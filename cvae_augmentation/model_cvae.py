@@ -21,7 +21,7 @@ class EncoderX(nn.Module):
     Input: X_lr of shape (B, C, 13, 11)
     Output: h_X of shape (B, d_x)
     """
-
+    
     def __init__(self, in_channels: int = 7, d_x: int = 64, base_filters: int = 32):
         """
         Args:
@@ -30,34 +30,36 @@ class EncoderX(nn.Module):
             base_filters: Number of filters in first conv layer
         """
         super().__init__()
-
+    
         self.in_channels = in_channels
         self.d_x = d_x
-
-        # Convolutional layers to extract features from small low-res grid
-        # (B, C, 13, 11) → (B, 32, 13, 11)
+    
+        # Convolutional layers
         self.conv1 = nn.Conv2d(in_channels, base_filters, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(base_filters)
-
-        # (B, 32, 13, 11) → (B, 64, 6, 5) with stride 2
+    
         self.conv2 = nn.Conv2d(base_filters, base_filters * 2, kernel_size=3, stride=2, padding=1)
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
-
-        # (B, 64, 6, 5) → (B, 128, 3, 2) with stride 2
+    
         self.conv3 = nn.Conv2d(base_filters * 2, base_filters * 4, kernel_size=3, stride=2, padding=1)
         self.bn3 = nn.BatchNorm2d(base_filters * 4)
-
-        # Calculate flattened size: 128 * 3 * 2 = 768 (approximately)
-        # This will be confirmed at runtime
-        self.flatten_size = base_filters * 4 * 3 * 2  # 128 * 3 * 2 = 768
-
+    
+        # Dynamically calculate flatten size
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, in_channels, 13, 11)
+            dummy_output = self.conv1(dummy_input)
+            dummy_output = self.conv2(dummy_output)
+            dummy_output = self.conv3(dummy_output)
+            self.flatten_size = dummy_output.view(1, -1).shape[1]
+            print(f"[EncoderX] Dynamically computed flatten_size: {self.flatten_size}")
+    
         # FC layers to embedding
         self.fc1 = nn.Linear(self.flatten_size, 256)
         self.fc2 = nn.Linear(256, d_x)
-
+    
         self.relu = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout(0.1)
-
+    
     def forward(self, x):
         """
         Args:
