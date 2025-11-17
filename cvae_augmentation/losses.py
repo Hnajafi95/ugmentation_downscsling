@@ -128,7 +128,8 @@ class CVAELoss(nn.Module):
                  lambda_ext: float = 3.0,
                  lambda_mass: float = 0.1,
                  beta_kl: float = 0.5,
-                 warmup_epochs: int = 10):
+                 warmup_epochs: int = 10,
+                 min_kl_weight: float = 0.0):
         """
         Args:
             p95: Threshold for extreme precipitation (from thresholds.json)
@@ -137,6 +138,7 @@ class CVAELoss(nn.Module):
             lambda_mass: Weight for mass loss
             beta_kl: Final weight for KL divergence
             warmup_epochs: Number of epochs to warm up KL weight from 0 to beta_kl
+            min_kl_weight: Minimum KL per latent dimension (free bits). KL below this is not penalized.
         """
         super().__init__()
 
@@ -146,6 +148,7 @@ class CVAELoss(nn.Module):
         self.lambda_mass = lambda_mass
         self.beta_kl = beta_kl
         self.warmup_epochs = warmup_epochs
+        self.min_kl_weight = min_kl_weight
 
         self.current_epoch = 0
         self.current_beta = 0.0
@@ -190,8 +193,15 @@ class CVAELoss(nn.Module):
         # KL loss
         kl_loss = kl_divergence(mu, logvar)
 
+        # Apply free bits (min_kl_weight) if specified
+        # Only penalize KL above the minimum threshold
+        if self.min_kl_weight > 0:
+            kl_loss_clamped = torch.clamp(kl_loss - self.min_kl_weight, min=0.0)
+        else:
+            kl_loss_clamped = kl_loss
+
         # Total loss
-        total_loss = rec_loss + self.lambda_mass * m_loss + self.current_beta * kl_loss
+        total_loss = rec_loss + self.lambda_mass * m_loss + self.current_beta * kl_loss_clamped
 
         # Return all components for logging
         loss_dict = {

@@ -310,7 +310,8 @@ def main(args):
         lambda_ext=config['loss']['lambda_ext'],
         lambda_mass=config['loss']['lambda_mass'],
         beta_kl=config['loss']['beta_kl'],
-        warmup_epochs=config['loss']['warmup_epochs']
+        warmup_epochs=config['loss']['warmup_epochs'],
+        min_kl_weight=config['loss'].get('min_kl_weight', 0.0)
     )
 
     # Create optimizer and scheduler
@@ -357,9 +358,12 @@ def main(args):
             print(f"\nEpoch {epoch+1}/{config['train']['epochs']}")
             print(f"  Train - Loss: {train_metrics['loss']:.4f}, "
                   f"Rec: {train_metrics['L_rec']:.4f}, "
+                  f"Mass: {train_metrics['L_mass']:.4f}, "
                   f"KL: {train_metrics['L_kl']:.4f}")
             print(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
                   f"Rec: {val_metrics['L_rec']:.4f}, "
+                  f"Mass: {val_metrics['L_mass']:.4f}, "
+                  f"KL: {val_metrics['L_kl']:.4f}, "
                   f"MAE: {val_metrics['MAE_all']:.4f}, "
                   f"Tail: {val_metrics['MAE_tail']:.4f}")
 
