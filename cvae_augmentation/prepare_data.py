@@ -55,6 +55,8 @@ def compute_distance_to_coast(land_mask_2d, lat, lon):
 def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
     """
     Categorize days as dry, moderate, heavy_coast, or heavy_interior.
+    
+    UPDATED: Use P99 as threshold for "heavy" to be more selective.
 
     Args:
         Y_hr_array: (T, H, W) normalized log-scale precipitation
@@ -86,9 +88,9 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
         max_val = land_values.max() if len(land_values) > 0 else 0
         mean_val = land_values.mean() if len(land_values) > 0 else 0
 
-        # Check for heavy rain
+        # UPDATED LOGIC: Use P99 for heavy threshold
         if max_val >= p99:
-            # Check if heavy rain is coastal or interior
+            # Heavy rain day - check if coastal or interior
             coastal_values = day_data[coastal_mask & land_mask_2d]
             interior_values = day_data[interior_mask]
 
@@ -99,13 +101,17 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
                 categories[str(t)] = "heavy_interior"
             else:
                 categories[str(t)] = "heavy_coast"
-        elif max_val >= p95 or mean_val >= p95 * 0.3:
+        elif max_val >= p95:
+            # Moderate-to-strong rain (P95-P99 range)
+            categories[str(t)] = "moderate"
+        elif mean_val >= p95 * 0.1:
+            # Light-to-moderate rain
             categories[str(t)] = "moderate"
         else:
+            # Dry or very light rain
             categories[str(t)] = "dry"
 
     return categories
-
 
 def main(args):
     """Main data preparation function."""
@@ -227,13 +233,34 @@ def main(args):
     print(f"   Saved split.json")
 
     # Compute thresholds on training data (land pixels only)
-    land_values_train = Y_train[:train_size, 0, land_mask_2d].ravel()
-    p95 = float(np.percentile(land_values_train, 95))
-    p99 = float(np.percentile(land_values_train, 99))
-
+    print("   Computing thresholds...")
+    
+    # OLD METHOD: P95/P99 of all pixels (too lenient)
+    # land_values_train = Y_train[:train_size, 0, land_mask_2d].ravel()
+    # p95 = float(np.percentile(land_values_train, 95))
+    # p99 = float(np.percentile(land_values_train, 99))
+    
+    # NEW METHOD: P95/P99 of daily maximum values (more selective)
+    daily_max_values = []
+    for t in range(train_size):
+        day_data = Y_train[t, 0]  # (H, W)
+        land_values = day_data[land_mask_2d]
+        if len(land_values) > 0:
+            daily_max_values.append(land_values.max())
+    
+    daily_max_values = np.array(daily_max_values)
+    p95 = float(np.percentile(daily_max_values, 95))
+    p99 = float(np.percentile(daily_max_values, 99))
+    p99_5 = float(np.percentile(daily_max_values, 99.5))
+    
+    print(f"   P95 of daily max: {p95:.4f}")
+    print(f"   P99 of daily max: {p99:.4f}")
+    print(f"   P99.5 of daily max: {p99_5:.4f}")
+    
     thresholds = {
         "P95": p95,
-        "P99": p99
+        "P99": p99,
+        "P99.5": p99_5
     }
 
     with open(metadata_dir / "thresholds.json", 'w') as f:
