@@ -311,15 +311,59 @@ def main(args):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
 
+    # Load normalization parameters for simplified/minimal loss (needed for mm/day conversion)
+    if config['loss'].get('type') in ['simplified', 'minimal']:
+        print("\nLoading normalization parameters for mm/day conversion...")
+
+        # Try to load pre-computed normalization parameters
+        norm_dir = Path(config['data_root']) / "data" / "metadata"
+        mean_pr_path = norm_dir / "mean_pr.npy"
+        std_pr_path = norm_dir / "std_pr.npy"
+        p99_mmday_path = norm_dir / "p99_mmday.npy"
+
+        if mean_pr_path.exists() and std_pr_path.exists():
+            mean_pr = np.load(mean_pr_path)
+            std_pr = np.load(std_pr_path)
+            print(f"  Loaded mean_pr and std_pr from {norm_dir}")
+        else:
+            # Compute from data (load a sample to get normalization params)
+            print(f"  Computing normalization from training data...")
+            # Load raw normalized data
+            sample_batch = next(iter(train_loader))
+            Y_sample = sample_batch['Y_hr']  # Already normalized
+
+            # For now, create dummy params (user should provide these!)
+            H, W = config['model']['H'], config['model']['W']
+            mean_pr = np.zeros((H, W), dtype=np.float32)
+            std_pr = np.ones((H, W), dtype=np.float32)
+            print(f"  WARNING: Using dummy normalization (zeros/ones)")
+            print(f"  Please save mean_pr.npy and std_pr.npy to {norm_dir}")
+
+        # Load or compute P99 in mm/day space
+        if p99_mmday_path.exists():
+            p99_mmday = float(np.load(p99_mmday_path))
+            print(f"  Loaded P99 (mm/day) = {p99_mmday:.2f}")
+        else:
+            # Estimate from normalized P99 (rough approximation)
+            # P99_normalized = 4.26, convert to mm/day
+            p99_norm = thresholds.get('P99', 4.26)
+            # Rough estimate: exp(p99_norm * std + mean) - 1
+            # Using mean of std across space
+            p99_mmday = float(np.expm1(p99_norm * std_pr.mean() + mean_pr.mean()))
+            print(f"  Estimated P99 (mm/day) ≈ {p99_mmday:.2f} (from normalized P99={p99_norm:.2f})")
+            print(f"  For accurate results, compute and save p99_mmday.npy")
+
     # Create loss criterion
     loss_type = config['loss'].get('type', 'original')
 
     print(f"\nCreating loss criterion: {loss_type}")
 
     if loss_type == 'simplified':
-        # Simplified loss: ONE weighted reconstruction + mass + KL
+        # Simplified loss: ONE weighted reconstruction + mass + KL (in mm/day space!)
         criterion = SimplifiedCVAELoss(
-            p99=thresholds.get('P99', p95),  # Use P99 if available, else P95
+            p99_mmday=p99_mmday,
+            mean_pr=mean_pr,
+            std_pr=std_pr,
             scale=config['loss'].get('scale', 36.6),
             w_min=config['loss'].get('w_min', 0.1),
             w_max=config['loss'].get('w_max', 2.0),
@@ -328,19 +372,21 @@ def main(args):
             beta_kl=config['loss']['beta_kl'],
             warmup_epochs=config['loss']['warmup_epochs']
         )
-        print(f"  Intensity weighting: scale={config['loss'].get('scale', 36.6)}, "
+        print(f"  Intensity weighting in mm/day space: scale={config['loss'].get('scale', 36.6)}, "
               f"tail_boost={config['loss'].get('tail_boost', 1.5)}")
 
     elif loss_type == 'minimal':
-        # Minimal loss: ONLY weighted reconstruction + KL (no mass conservation)
+        # Minimal loss: ONLY weighted reconstruction + KL (no mass conservation, in mm/day space!)
         criterion = MinimalCVAELoss(
-            p99=thresholds.get('P99', p95),
+            p99_mmday=p99_mmday,
+            mean_pr=mean_pr,
+            std_pr=std_pr,
             scale=config['loss'].get('scale', 36.6),
             tail_boost=config['loss'].get('tail_boost', 1.5),
             beta_kl=config['loss']['beta_kl'],
             warmup_epochs=config['loss']['warmup_epochs']
         )
-        print(f"  Minimal loss (2 terms only): weighted_rec + KL")
+        print(f"  Minimal loss (2 terms only) in mm/day space: weighted_rec + KL")
 
     else:
         # Original multi-objective loss
