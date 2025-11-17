@@ -1,6 +1,36 @@
 # cVAE Training Fixes - Summary
 
-## Problems Identified
+**⚠️ IMPORTANT UPDATE (2025-11-17)**: Initial fix had a critical bug causing poor extreme rainfall prediction. See "Critical Bug Fix" section below.
+
+---
+
+## 🚨 Critical Bug Fix (Commit 24f5c01)
+
+**Problem Found**: The initial fix (commit ed5f840) introduced a bug that made the model **terrible at predicting extreme rainfall**!
+
+**Evidence from user's training**:
+- **Original model**: Tail MAE = 0.21 (good at extremes)
+- **After first fix**: Tail MAE = 2.37 (**10× worse!**)
+- Overall MAE improved (2.6 → 0.76), but **at the cost of extreme events**
+
+**Root Cause**: In `losses.py`, I added this scaling:
+```python
+extreme_sample_ratio = len(mae_ext_per_sample) / batch_size
+loss = lambda_base * mae_base + lambda_ext * mae_ext * extreme_sample_ratio
+```
+
+When only 10% of samples had extreme pixels, `extreme_sample_ratio = 0.1`, so the effective extreme weight became `2.0 × 0.1 = 0.2`, which is far below `lambda_base = 1.0`. The model learned to ignore extremes!
+
+**Fix Applied**:
+1. **Removed** `extreme_sample_ratio` scaling from `losses.py:62-65`
+2. **Increased** `lambda_ext` from `2.0` → `5.0` (middle ground between 10.0 volatile and 2.0 too weak)
+3. **Kept** per-sample averaging for stability
+
+**Expected Result**: Tail MAE should now be much better (<1.0) while maintaining stable training.
+
+---
+
+## Problems Identified (Original Analysis)
 
 ### 1. **Extreme Loss Volatility** ⚠️ CRITICAL
 - **Issue**: `lambda_ext: 10.0` caused validation loss to spike 3× between epochs
@@ -207,16 +237,19 @@ Add to validation logging:
 
 ## Summary of Changes
 
-| Parameter | Old Value | New Value | Reason |
+| Parameter | Old Value | New Value (Final) | Reason |
 |-----------|-----------|-----------|---------|
-| `lambda_ext` | 10.0 | 2.0 | Reduce volatility |
-| `beta_kl` | 0.1 | 0.01 | Prevent collapse |
-| `warmup_epochs` | 30 | 15 | Complete before stopping |
-| `lambda_mass` | 0.001 | 0.01 | Better conservation |
+| `lambda_ext` | 10.0 | **5.0** | Balance: reduce volatility but keep extreme focus |
+| `beta_kl` | 0.1 | 0.01 | Prevent posterior collapse |
+| `warmup_epochs` | 30 | 15 | Complete before early stopping |
+| `lambda_mass` | 0.001 | 0.01 | Better mass conservation |
 | `lr` | 0.00005 | 0.0001 | Faster convergence |
 | `epochs` | 80 | 100 | More training time |
 | `early_stopping_patience` | 20 | 25 | More tolerance |
 | `early_stopping_metric` | L_rec | MAE_all | Stable metric |
-| Loss computation | Batch-level | Per-sample + ratio | Reduce variance |
+| Loss computation | Batch-level | **Per-sample (no ratio scaling)** | Stability without losing extreme focus |
 
-**Expected Outcome**: Training should run 30-50 epochs, show stable improvement, and produce a model with much better extreme precipitation skill!
+**Expected Outcome**:
+- Training should run 30-50 epochs with stable improvement
+- **Tail MAE should be <1.0** (much better than 2.37 from buggy version)
+- Model should balance overall accuracy with extreme event skill
