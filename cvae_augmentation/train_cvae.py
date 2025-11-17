@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from model_cvae import CVAE
 from losses import CVAELoss
+from losses_simplified import SimplifiedCVAELoss, MinimalCVAELoss
 from utils_metrics import MetricsTracker
 from data_io import get_dataloaders, load_thresholds
 
@@ -311,14 +312,48 @@ def main(args):
     print(f"Model parameters: {n_params:,}")
 
     # Create loss criterion
-    criterion = CVAELoss(
-        p95=p95,
-        lambda_base=config['loss']['lambda_base'],
-        lambda_ext=config['loss']['lambda_ext'],
-        lambda_mass=config['loss']['lambda_mass'],
-        beta_kl=config['loss']['beta_kl'],
-        warmup_epochs=config['loss']['warmup_epochs']
-    )
+    loss_type = config['loss'].get('type', 'original')
+
+    print(f"\nCreating loss criterion: {loss_type}")
+
+    if loss_type == 'simplified':
+        # Simplified loss: ONE weighted reconstruction + mass + KL
+        criterion = SimplifiedCVAELoss(
+            p99=thresholds.get('P99', p95),  # Use P99 if available, else P95
+            scale=config['loss'].get('scale', 36.6),
+            w_min=config['loss'].get('w_min', 0.1),
+            w_max=config['loss'].get('w_max', 2.0),
+            tail_boost=config['loss'].get('tail_boost', 1.5),
+            lambda_mass=config['loss'].get('lambda_mass', 0.01),
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs']
+        )
+        print(f"  Intensity weighting: scale={config['loss'].get('scale', 36.6)}, "
+              f"tail_boost={config['loss'].get('tail_boost', 1.5)}")
+
+    elif loss_type == 'minimal':
+        # Minimal loss: ONLY weighted reconstruction + KL (no mass conservation)
+        criterion = MinimalCVAELoss(
+            p99=thresholds.get('P99', p95),
+            scale=config['loss'].get('scale', 36.6),
+            tail_boost=config['loss'].get('tail_boost', 1.5),
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs']
+        )
+        print(f"  Minimal loss (2 terms only): weighted_rec + KL")
+
+    else:
+        # Original multi-objective loss
+        criterion = CVAELoss(
+            p95=p95,
+            lambda_base=config['loss']['lambda_base'],
+            lambda_ext=config['loss']['lambda_ext'],
+            lambda_mass=config['loss']['lambda_mass'],
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs']
+        )
+        print(f"  Original loss: lambda_base={config['loss']['lambda_base']}, "
+              f"lambda_ext={config['loss']['lambda_ext']}")
 
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
