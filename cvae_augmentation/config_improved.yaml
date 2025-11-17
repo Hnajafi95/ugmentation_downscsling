@@ -1,0 +1,103 @@
+# Improved Configuration for cVAE training
+# Addresses issues: wrong early stopping metric, no sample evaluation, model too large
+
+# Data paths
+data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_improved"
+
+# Static maps configuration
+statics:
+  use_land_sea: true
+  use_dist_coast: true
+  use_elevation: false
+  normalize_statics: true
+
+# Model architecture - REDUCED SIZE to prevent overfitting
+model:
+  # Low-res encoder
+  d_x: 64                # Reduced from 96
+  in_channels_X: 6
+
+  # High-res encoder
+  d_y: 256               # Reduced from 384
+  in_channels_Y: 1
+
+  static_channels: 2
+
+  # Latent space
+  d_z: 64                # Reduced from 96
+
+  # High-res grid dimensions
+  H: 156
+  W: 132
+
+  # Base number of convolutional filters - REDUCED
+  base_filters: 64       # Reduced from 96 (60% fewer parameters)
+
+# Loss function weights - BALANCED for extremes
+loss:
+  lambda_base: 1.0
+  lambda_ext: 5.0        # Emphasis on extremes
+  lambda_mass: 0.01
+  beta_kl: 0.01          # Light KL to prevent collapse
+  warmup_epochs: 20      # Longer warmup
+  p95_threshold: "from_thresholds_json"
+  use_squared_error: false
+
+# Training configuration
+train:
+  epochs: 150            # More epochs for proper convergence
+  batch_size: 64
+  num_workers: 2
+  lr: 0.0001
+  weight_decay: 0.0005   # Increased regularization (was 0.0001)
+  grad_clip: 1.0
+  amp: true
+  save_every: 10         # Save less frequently
+  early_stopping_patience: 40  # Much more patient
+  # CRITICAL: Use combined metric for early stopping
+  early_stopping_metric: "combined_metric"  # See below
+  # Combined metric = 0.4 * MAE_all + 0.6 * MAE_tail (prioritize extremes)
+  combined_metric_weights:
+    MAE_all: 0.4
+    MAE_tail: 0.6
+
+# Learning rate scheduler - ADJUSTED
+scheduler:
+  type: "cosine"
+  T_max: 150             # Match epochs
+  eta_min: 0.000001      # Lower minimum LR
+
+# Validation and logging
+validation:
+  val_every: 1
+  log_every: 50
+  # NEW: Sample generation during validation
+  generate_samples: true  # Generate samples every N epochs to check quality
+  generate_every: 10      # Generate samples every 10 epochs
+  num_samples_per_day: 3  # Generate 3 samples per heavy day
+
+# Sampling configuration
+sampling:
+  mode: "posterior"
+  K: 5                   # Generate more samples per day (was 2)
+  days: "heavy_only"
+  min_threshold: 0.1
+  temperature: 1.0
+
+# Device configuration
+device: "cuda"
+seed: 42
+
+# NEW: Evaluation metrics for generated samples
+evaluation:
+  # Metrics to compute on generated samples vs real heavy days
+  metrics:
+    - "spatial_pattern_correlation"  # How similar is spatial structure?
+    - "extreme_value_distribution"   # Does it match the distribution?
+    - "mass_conservation"            # Is total precipitation preserved?
+    - "diversity_score"              # Are samples diverse enough?
+
+  # Thresholds for quality control
+  min_correlation: 0.6    # Minimum spatial correlation with real data
+  min_diversity: 0.3      # Minimum diversity between generated samples

@@ -212,6 +212,13 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask)
         'beta': criterion.current_beta
     })
 
+    # Compute combined metric if configured
+    if 'combined_metric_weights' in config.get('train', {}):
+        weights = config['train']['combined_metric_weights']
+        combined = (weights.get('MAE_all', 0.5) * metrics['MAE_all'] +
+                    weights.get('MAE_tail', 0.5) * metrics['MAE_tail'])
+        metrics['combined_metric'] = combined
+
     return metrics
 
 
@@ -325,7 +332,7 @@ def main(args):
     log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_kl',
                   'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_kl',
                   'val_MAE_all', 'val_MAE_tail', 'val_RMSE_all', 'val_mass_bias',
-                  'beta', 'lr']
+                  'beta', 'lr', 'val_combined_metric']
 
     with open(log_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=log_fields)
@@ -385,7 +392,8 @@ def main(args):
                     'val_RMSE_all': val_metrics['RMSE_all'],
                     'val_mass_bias': val_metrics['mass_bias'],
                     'beta': val_metrics['beta'],
-                    'lr': optimizer.param_groups[0]['lr']
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'val_combined_metric': val_metrics.get('combined_metric', '')
                 })
 
             # Check for improvement using configured metric
