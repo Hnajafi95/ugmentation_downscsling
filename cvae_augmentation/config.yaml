@@ -38,23 +38,25 @@ model:
 # Loss function weights
 loss:
   lambda_base: 1.0       # Weight for base MAE
-  lambda_ext: 10.0        # Weight for extreme MAE (emphasize heavy precipitation)
-  lambda_mass: 0.001       # Weight for mass conservation loss
-  beta_kl: 0.1           # Final weight for KL divergence
-  warmup_epochs: 30      # Number of epochs for KL warm-up (0 → beta_kl)
+  lambda_ext: 2.0        # Weight for extreme MAE (REDUCED from 10.0 to reduce volatility)
+  lambda_mass: 0.01      # Weight for mass conservation loss (increased from 0.001)
+  beta_kl: 0.01          # Final weight for KL divergence (REDUCED from 0.1 to prevent posterior collapse)
+  warmup_epochs: 15      # Number of epochs for KL warm-up (REDUCED from 30 to complete before early stopping)
   p95_threshold: "from_thresholds_json"  # Will be loaded from data/metadata/thresholds.json
+  use_squared_error: false  # Use MSE instead of MAE for reconstruction (optional)
 
 # Training configuration
 train:
-  epochs: 80             # Number of training epochs
-  batch_size: 64          # Batch size (adjust based on GPU memory)
+  epochs: 100            # Number of training epochs (increased to allow full training)
+  batch_size: 64         # Batch size (adjust based on GPU memory)
   num_workers: 2         # Number of data loading workers
-  lr: 0.00005              # Learning rate
+  lr: 0.0001             # Learning rate (INCREASED from 0.00005 for faster convergence)
   weight_decay: 0.0001   # Weight decay for AdamW optimizer
   grad_clip: 1.0         # Gradient clipping threshold
   amp: true              # Use automatic mixed precision (AMP)
   save_every: 5          # Save checkpoint every N epochs
-  early_stopping_patience: 20  # Stop if no improvement for N epochs
+  early_stopping_patience: 25  # Stop if no improvement for N epochs (increased from 20)
+  early_stopping_metric: "MAE_all"  # Metric to monitor: "MAE_all" (stable) or "L_rec" (volatile)
 
 # Learning rate scheduler
 scheduler:

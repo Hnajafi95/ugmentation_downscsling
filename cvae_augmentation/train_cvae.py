@@ -338,6 +338,10 @@ def main(args):
     print("Starting training...")
     print("=" * 80)
 
+    # Get early stopping metric from config (default to MAE_all for stability)
+    early_stopping_metric = config['train'].get('early_stopping_metric', 'MAE_all')
+    print(f"Early stopping metric: {early_stopping_metric}")
+
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
@@ -384,15 +388,16 @@ def main(args):
                     'lr': optimizer.param_groups[0]['lr']
                 })
 
-            # Check for improvement
-            if val_metrics['L_rec'] < best_val_loss:
-                best_val_loss = val_metrics['L_rec']
+            # Check for improvement using configured metric
+            current_metric_value = val_metrics[early_stopping_metric]
+            if current_metric_value < best_val_loss:
+                best_val_loss = current_metric_value
                 epochs_no_improve = 0
 
                 # Save best checkpoint
                 best_path = checkpoints_dir / "cvae_best.pt"
                 save_checkpoint(model, optimizer, scheduler, epoch, val_metrics, best_path)
-                print(f"  Saved best model (val_L_rec={best_val_loss:.4f})")
+                print(f"  Saved best model ({early_stopping_metric}={best_val_loss:.4f})")
             else:
                 epochs_no_improve += 1
 
@@ -415,7 +420,7 @@ def main(args):
 
     print("\n" + "=" * 80)
     print("Training complete!")
-    print(f"Best validation L_rec: {best_val_loss:.4f}")
+    print(f"Best validation {early_stopping_metric}: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {checkpoints_dir}")
     print(f"Training log saved to: {log_file}")
     print("=" * 80)

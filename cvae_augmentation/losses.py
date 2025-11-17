@@ -14,11 +14,12 @@ import torch.nn.functional as F
 
 def extreme_weighted_mae(y_true, y_hat, p95, lambda_base=1.0, lambda_ext=3.0):
     """
-    Compute extreme-weighted MAE loss.
+    Compute extreme-weighted MAE loss with per-sample normalization.
 
     L_rec = λ_base * MAE_all + λ_ext * MAE_extreme
 
     Where MAE_extreme focuses on pixels where y_true >= p95.
+    Uses per-sample averaging to reduce batch variance.
 
     Args:
         y_true: (B, 1, H, W) ground truth
@@ -38,19 +39,30 @@ def extreme_weighted_mae(y_true, y_hat, p95, lambda_base=1.0, lambda_ext=3.0):
     # Create extreme mask
     mask_ext = (y_true >= p95).float()  # (B, 1, H, W)
 
-    # Count extreme pixels
-    n_ext = mask_ext.sum()
+    # Per-sample extreme MAE to reduce variance
+    diff_ext = torch.abs(y_hat - y_true) * mask_ext  # (B, 1, H, W)
 
-    if n_ext > 0:
-        # MAE over extreme pixels only
-        diff_ext = torch.abs(y_hat - y_true) * mask_ext
-        mae_ext = diff_ext.sum() / n_ext
+    # Count extreme pixels per sample
+    n_ext_per_sample = mask_ext.sum(dim=(1, 2, 3))  # (B,)
+
+    # Compute MAE per sample (only for samples with extreme pixels)
+    mae_ext_per_sample = []
+    for i in range(y_true.shape[0]):
+        if n_ext_per_sample[i] > 0:
+            mae_ext_sample = diff_ext[i].sum() / n_ext_per_sample[i]
+            mae_ext_per_sample.append(mae_ext_sample)
+
+    # Average across samples that have extreme pixels
+    if len(mae_ext_per_sample) > 0:
+        mae_ext = torch.stack(mae_ext_per_sample).mean()
     else:
         # No extreme pixels in this batch
         mae_ext = torch.tensor(0.0, device=y_true.device)
 
-    # Combined loss
-    loss = lambda_base * mae_base + lambda_ext * mae_ext
+    # Combined loss - use scaled extreme loss to prevent dominance
+    # Scale down extreme loss contribution if few samples have extremes
+    extreme_sample_ratio = len(mae_ext_per_sample) / y_true.shape[0]
+    loss = lambda_base * mae_base + lambda_ext * mae_ext * extreme_sample_ratio
 
     return loss, mae_base, mae_ext
 
