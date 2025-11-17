@@ -1,8 +1,8 @@
 # Configuration file for cVAE training and sampling
 
 # Data paths
-data_root: "/home/user/ugmentation_downscsling/cvae_augmentation"
-outputs_root: "/home/user/ugmentation_downscsling/cvae_augmentation/outputs/cvae"
+data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae"
 
 # Static maps configuration
 statics:
@@ -15,7 +15,7 @@ statics:
 model:
   # Low-res encoder
   d_x: 64                # Dimension of h_X embedding
-  in_channels_X: 7       # Number of input channels in X_lr (adjust based on your data)
+  in_channels_X: 6       # Number of input channels in X_lr (adjust based on your data)
 
   # High-res encoder
   d_y: 256               # Dimension of h_Y embedding
@@ -38,16 +38,16 @@ model:
 # Loss function weights
 loss:
   lambda_base: 1.0       # Weight for base MAE
-  lambda_ext: 3.0        # Weight for extreme MAE (emphasize heavy precipitation)
+  lambda_ext: 10.0        # Weight for extreme MAE (emphasize heavy precipitation)
   lambda_mass: 0.1       # Weight for mass conservation loss
-  beta_kl: 0.5           # Final weight for KL divergence
+  beta_kl: 0.3           # Final weight for KL divergence
   warmup_epochs: 10      # Number of epochs for KL warm-up (0 → beta_kl)
   p95_threshold: "from_thresholds_json"  # Will be loaded from data/metadata/thresholds.json
 
 # Training configuration
 train:
   epochs: 80             # Number of training epochs
-  batch_size: 6          # Batch size (adjust based on GPU memory)
+  batch_size: 32          # Batch size (adjust based on GPU memory)
   num_workers: 2         # Number of data loading workers
   lr: 0.001              # Learning rate
   weight_decay: 0.0001   # Weight decay for AdamW optimizer
