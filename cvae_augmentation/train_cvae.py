@@ -316,33 +316,35 @@ def main(args):
         print("\nLoading normalization parameters for mm/day conversion...")
 
         # Try to load pre-computed normalization parameters
+        # These files are created by SRDRN/preprocessing.py in mydata_corrected/
+        # User should copy them to cVAE data directory
         norm_dir = Path(config['data_root']) / "data" / "metadata"
-        mean_pr_path = norm_dir / "mean_pr.npy"
-        std_pr_path = norm_dir / "std_pr.npy"
+        mean_pr_path = norm_dir / "ERA5_mean_train.npy"
+        std_pr_path = norm_dir / "ERA5_std_train.npy"
         p99_mmday_path = norm_dir / "p99_mmday.npy"
 
         if mean_pr_path.exists() and std_pr_path.exists():
             mean_pr = np.load(mean_pr_path)
             std_pr = np.load(std_pr_path)
-            print(f"  Loaded mean_pr and std_pr from {norm_dir}")
+            print(f"  ✓ Loaded ERA5_mean_train.npy and ERA5_std_train.npy from {norm_dir}")
         else:
-            # Compute from data (load a sample to get normalization params)
-            print(f"  Computing normalization from training data...")
-            # Load raw normalized data
-            sample_batch = next(iter(train_loader))
-            Y_sample = sample_batch['Y_hr']  # Already normalized
+            # Create dummy params (user should copy these from SRDRN preprocessing!)
+            print(f"  ⚠ WARNING: Normalization files not found in {norm_dir}")
+            print(f"  Expected files:")
+            print(f"    - ERA5_mean_train.npy")
+            print(f"    - ERA5_std_train.npy")
+            print(f"  These are created by SRDRN/preprocessing.py in mydata_corrected/")
+            print(f"  Copy them to {norm_dir} for accurate mm/day conversion")
 
-            # For now, create dummy params (user should provide these!)
             H, W = config['model']['H'], config['model']['W']
             mean_pr = np.zeros((H, W), dtype=np.float32)
             std_pr = np.ones((H, W), dtype=np.float32)
-            print(f"  WARNING: Using dummy normalization (zeros/ones)")
-            print(f"  Please save mean_pr.npy and std_pr.npy to {norm_dir}")
+            print(f"  Using dummy normalization (zeros/ones) - results will be INACCURATE!")
 
         # Load or compute P99 in mm/day space
         if p99_mmday_path.exists():
             p99_mmday = float(np.load(p99_mmday_path))
-            print(f"  Loaded P99 (mm/day) = {p99_mmday:.2f}")
+            print(f"  ✓ Loaded P99 (mm/day) = {p99_mmday:.2f}")
         else:
             # Estimate from normalized P99 (rough approximation)
             # P99_normalized = 4.26, convert to mm/day
@@ -351,7 +353,7 @@ def main(args):
             # Using mean of std across space
             p99_mmday = float(np.expm1(p99_norm * std_pr.mean() + mean_pr.mean()))
             print(f"  Estimated P99 (mm/day) ≈ {p99_mmday:.2f} (from normalized P99={p99_norm:.2f})")
-            print(f"  For accurate results, compute and save p99_mmday.npy")
+            print(f"  For accurate results, compute and save p99_mmday.npy to {norm_dir}")
 
     # Create loss criterion
     loss_type = config['loss'].get('type', 'original')
