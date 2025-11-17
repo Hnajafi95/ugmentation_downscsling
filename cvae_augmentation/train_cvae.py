@@ -403,6 +403,9 @@ def main(args):
         print(f"  Original loss: lambda_base={config['loss']['lambda_base']}, "
               f"lambda_ext={config['loss']['lambda_ext']}")
 
+    # Move criterion to device (important for SimplifiedCVAELoss with buffers!)
+    criterion = criterion.to(device)
+
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
     scheduler, sched_type = create_scheduler(optimizer, config)
