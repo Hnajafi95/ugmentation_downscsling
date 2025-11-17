@@ -14,11 +14,11 @@ statics:
 # Model architecture
 model:
   # Low-res encoder
-  d_x: 64                # Dimension of h_X embedding
+  d_x: 96                # Dimension of h_X embedding
   in_channels_X: 6       # Number of input channels in X_lr (adjust based on your data)
 
   # High-res encoder
-  d_y: 256               # Dimension of h_Y embedding
+  d_y: 384               # Dimension of h_Y embedding
   in_channels_Y: 1       # Number of channels in Y_hr (precipitation only)
 
   # Static channels (automatically determined from statics config)
@@ -26,35 +26,35 @@ model:
   static_channels: 2     # land_sea + dist_coast
 
   # Latent space
-  d_z: 64                # Dimension of latent z
+  d_z: 96                # Dimension of latent z
 
   # High-res grid dimensions (will be loaded from H_W.json)
   H: 156                 # High-res height
   W: 132                 # High-res width
 
   # Base number of convolutional filters
-  base_filters: 64
+  base_filters: 96
 
 # Loss function weights
 loss:
   lambda_base: 1.0       # Weight for base MAE
   lambda_ext: 10.0        # Weight for extreme MAE (emphasize heavy precipitation)
-  lambda_mass: 0.1       # Weight for mass conservation loss
-  beta_kl: 0.3           # Final weight for KL divergence
-  warmup_epochs: 10      # Number of epochs for KL warm-up (0 → beta_kl)
+  lambda_mass: 0.001       # Weight for mass conservation loss
+  beta_kl: 0.1           # Final weight for KL divergence
+  warmup_epochs: 30      # Number of epochs for KL warm-up (0 → beta_kl)
   p95_threshold: "from_thresholds_json"  # Will be loaded from data/metadata/thresholds.json
 
 # Training configuration
 train:
   epochs: 80             # Number of training epochs
-  batch_size: 32          # Batch size (adjust based on GPU memory)
+  batch_size: 64          # Batch size (adjust based on GPU memory)
   num_workers: 2         # Number of data loading workers
-  lr: 0.001              # Learning rate
+  lr: 0.00005              # Learning rate
   weight_decay: 0.0001   # Weight decay for AdamW optimizer
   grad_clip: 1.0         # Gradient clipping threshold
   amp: true              # Use automatic mixed precision (AMP)
   save_every: 5          # Save checkpoint every N epochs
-  early_stopping_patience: 15  # Stop if no improvement for N epochs
+  early_stopping_patience: 20  # Stop if no improvement for N epochs
 
 # Learning rate scheduler
 scheduler:
