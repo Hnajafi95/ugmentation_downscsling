@@ -59,10 +59,9 @@ def extreme_weighted_mae(y_true, y_hat, p95, lambda_base=1.0, lambda_ext=3.0):
         # No extreme pixels in this batch
         mae_ext = torch.tensor(0.0, device=y_true.device)
 
-    # Combined loss - use scaled extreme loss to prevent dominance
-    # Scale down extreme loss contribution if few samples have extremes
-    extreme_sample_ratio = len(mae_ext_per_sample) / y_true.shape[0]
-    loss = lambda_base * mae_base + lambda_ext * mae_ext * extreme_sample_ratio
+    # Combined loss without ratio scaling
+    # The per-sample averaging already stabilizes the loss
+    loss = lambda_base * mae_base + lambda_ext * mae_ext
 
     return loss, mae_base, mae_ext
 

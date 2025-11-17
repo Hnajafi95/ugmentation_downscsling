@@ -38,7 +38,7 @@ model:
 # Loss function weights
 loss:
   lambda_base: 1.0       # Weight for base MAE
-  lambda_ext: 2.0        # Weight for extreme MAE (REDUCED from 10.0 to reduce volatility)
+  lambda_ext: 5.0        # Weight for extreme MAE (middle ground: was 10.0 originally, reduced for stability)
   lambda_mass: 0.01      # Weight for mass conservation loss (increased from 0.001)
   beta_kl: 0.01          # Final weight for KL divergence (REDUCED from 0.1 to prevent posterior collapse)
   warmup_epochs: 15      # Number of epochs for KL warm-up (REDUCED from 30 to complete before early stopping)
