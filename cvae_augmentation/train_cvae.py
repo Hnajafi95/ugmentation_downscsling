@@ -266,6 +266,12 @@ def main(args):
 
     # Create dataloaders
     print("\nCreating dataloaders...")
+    use_stratified = config['train'].get('use_stratified_sampling', False)
+    min_heavy_fraction = config['train'].get('min_heavy_fraction', 0.2)
+
+    if use_stratified:
+        print(f"Using stratified sampling with min_heavy_fraction={min_heavy_fraction}")
+
     train_loader, val_loader, test_loader = get_dataloaders(
         data_root=config['data_root'],
         batch_size=config['train']['batch_size'],
@@ -273,7 +279,9 @@ def main(args):
         use_land_sea=config['statics']['use_land_sea'],
         use_dist_coast=config['statics']['use_dist_coast'],
         use_elevation=config['statics']['use_elevation'],
-        normalize_statics=config['statics']['normalize_statics']
+        normalize_statics=config['statics']['normalize_statics'],
+        use_stratified_sampling=use_stratified,
+        min_heavy_fraction=min_heavy_fraction
     )
 
     print(f"  Train batches: {len(train_loader)}")
