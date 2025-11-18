@@ -29,15 +29,15 @@ model:
 loss:
   type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
 
-  # Intensity weighting (like SRDRN)
-  scale: 36.6         # Weighting scale (light rain: w=0.1, heavy rain: w=2.0)
-  w_min: 0.1          # Min weight
-  w_max: 2.0          # Max weight (20× more than light rain!)
+  # Intensity weighting - OPTIMIZED based on data analysis
+  # P90 = 11.7 mm/day, P99 = 43.6 mm/day
+  scale: 11.7         # Based on P90 percentile (was 36.6 - too high!)
+  w_min: 0.1          # Min weight for light rain
+  w_max: 3.0          # Increased from 2.0 to allow stronger extreme emphasis
 
   # Extra boost for extreme tail (P99+)
-  tail_boost: 1.5     # 1.5 = 50% extra weight for P99+ pixels
-                      # 1.0 = no boost (just intensity weighting)
-                      # 2.0 = 100% extra weight
+  # With scale=11.7, P99 gets base weight=2.0, so effective=2.0*2.0=4.0 (40x vs light)
+  tail_boost: 2.0     # Increased from 1.5 for more emphasis on extremes
 
   # Mass conservation (optional, small weight)
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
