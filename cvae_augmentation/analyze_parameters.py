@@ -17,35 +17,63 @@ from pathlib import Path
 import json
 
 
-def load_data(data_root):
-    """Load all necessary data for analysis."""
+def load_data(data_root, srdrn_dir=None):
+    """Load all necessary data for analysis.
+
+    Args:
+        data_root: Path to cVAE data directory (e.g., /scratch/.../cVAE_augmentation)
+        srdrn_dir: Optional path to SRDRN output directory for normalization params
+                   (e.g., /scratch/.../mydata_corrected)
+    """
     data_root = Path(data_root)
 
     # Load split information
     split_path = data_root / "data" / "metadata" / "split.json"
+    print(f"Loading split from: {split_path}")
     with open(split_path, 'r') as f:
         split = json.load(f)
 
     # Load normalization parameters
+    # First try cVAE metadata folder, then fall back to SRDRN output folder
     metadata_dir = data_root / "data" / "metadata"
-    mean_pr = np.load(metadata_dir / "ERA5_mean_train.npy")
-    std_pr = np.load(metadata_dir / "ERA5_std_train.npy")
+    mean_path = metadata_dir / "ERA5_mean_train.npy"
+    std_path = metadata_dir / "ERA5_std_train.npy"
+
+    if not mean_path.exists() or not std_path.exists():
+        if srdrn_dir:
+            srdrn_dir = Path(srdrn_dir)
+            mean_path = srdrn_dir / "ERA5_mean_train.npy"
+            std_path = srdrn_dir / "ERA5_std_train.npy"
+            print(f"Loading normalization params from SRDRN dir: {srdrn_dir}")
+        else:
+            raise FileNotFoundError(
+                f"Normalization files not found in {metadata_dir}. "
+                f"Please specify --srdrn_dir to load from SRDRN output directory."
+            )
+    else:
+        print(f"Loading normalization params from: {metadata_dir}")
+
+    mean_pr = np.load(mean_path)
+    std_pr = np.load(std_path)
+    print(f"  Loaded mean_pr shape: {mean_pr.shape}, std_pr shape: {std_pr.shape}")
 
     # Load land mask
     statics_dir = data_root / "data" / "statics"
-    land_mask = np.load(statics_dir / "land_sea_mask.npy")[0]  # (H, W)
+    land_mask_path = statics_dir / "land_sea_mask.npy"
+    print(f"Loading land mask from: {land_mask_path}")
+    land_mask = np.load(land_mask_path)[0]  # (H, W)
 
     # Load all training Y_hr data
     Y_hr_dir = data_root / "data" / "Y_hr"
     train_days = split['train']
 
-    print(f"Loading {len(train_days)} training days...")
+    print(f"Loading {len(train_days)} training days from {Y_hr_dir}...")
 
     all_mm_values = []
     daily_max_mm = []
     daily_mean_mm = []
 
-    for day_id in train_days:
+    for i, day_id in enumerate(train_days):
         Y_hr_path = Y_hr_dir / f"day_{day_id:06d}.npy"
         Y_hr_norm = np.load(Y_hr_path)[0]  # (H, W)
 
@@ -62,6 +90,10 @@ def load_data(data_root):
         # Daily statistics
         daily_max_mm.append(land_values.max())
         daily_mean_mm.append(land_values.mean())
+
+        # Progress indicator
+        if (i + 1) % 1000 == 0:
+            print(f"  Processed {i + 1}/{len(train_days)} days...")
 
     all_mm_values = np.concatenate(all_mm_values)
     daily_max_mm = np.array(daily_max_mm)
@@ -196,7 +228,9 @@ def main(args):
 
     # Load data
     print(f"\nLoading data from: {args.data_root}")
-    data_dict = load_data(args.data_root)
+    if args.srdrn_dir:
+        print(f"Using SRDRN output dir for normalization: {args.srdrn_dir}")
+    data_dict = load_data(args.data_root, args.srdrn_dir)
 
     print(f"\nData summary:")
     print(f"  Training days: {data_dict['n_days']}")
@@ -337,8 +371,12 @@ loss:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze data for cVAE parameter recommendations")
-    parser.add_argument("--data_root", type=str, required=True,
+    parser.add_argument("--data_root", type=str,
+                        default="/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation",
                         help="Path to cVAE data directory (same as config data_root)")
+    parser.add_argument("--srdrn_dir", type=str,
+                        default="/scratch/user/u.hn319322/ondemand/Downscaling/mydata_corrected",
+                        help="Path to SRDRN output directory for normalization params (if not in data_root)")
 
     args = parser.parse_args()
     main(args)
