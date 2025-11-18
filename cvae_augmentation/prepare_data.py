@@ -267,6 +267,58 @@ def main(args):
         json.dump(thresholds, f, indent=2)
     print(f"   Saved thresholds.json (P95={p95:.4f}, P99={p99:.4f})")
 
+    # Copy normalization parameters and compute P99 in mm/day space
+    print("\n   Copying normalization parameters and computing P99 in mm/day space...")
+
+    # Check if normalization files exist in input directory
+    mean_pr_src = input_dir / "ERA5_mean_train.npy"
+    std_pr_src = input_dir / "ERA5_std_train.npy"
+
+    if mean_pr_src.exists() and std_pr_src.exists():
+        # Copy to metadata directory
+        import shutil
+        shutil.copy2(mean_pr_src, metadata_dir / "ERA5_mean_train.npy")
+        shutil.copy2(std_pr_src, metadata_dir / "ERA5_std_train.npy")
+        print(f"   ✓ Copied ERA5_mean_train.npy and ERA5_std_train.npy to metadata/")
+
+        # Load for P99 computation
+        mean_pr = np.load(mean_pr_src)  # (H, W)
+        std_pr = np.load(std_pr_src)    # (H, W)
+
+        # Compute P99 in mm/day space from training data
+        print(f"   Computing P99 in mm/day space from {train_size} training days...")
+        all_mm_values = []
+
+        for t in range(train_size):
+            # Get normalized data
+            Y_norm = Y_train[t, 0]  # (H, W)
+
+            # Denormalize to log1p space: logp = y * std + mean (pixel-wise!)
+            logp = Y_norm * std_pr + mean_pr
+
+            # Convert to mm/day: mm = exp(logp) - 1
+            mm = np.expm1(logp)
+
+            # Extract land pixels only
+            mm_land = mm[land_mask_2d]
+            all_mm_values.append(mm_land)
+
+        # Concatenate and compute P99
+        all_mm_values = np.concatenate(all_mm_values)
+        p99_mmday = np.percentile(all_mm_values, 99)
+
+        # Save P99 in mm/day
+        np.save(metadata_dir / "p99_mmday.npy", p99_mmday)
+
+        print(f"   ✓ Computed P99 (mm/day) = {p99_mmday:.2f}")
+        print(f"     (From {len(all_mm_values):,} land pixel values)")
+        print(f"     Range: [{all_mm_values.min():.2f}, {all_mm_values.max():.2f}] mm/day")
+    else:
+        print(f"   ⚠ WARNING: Normalization files not found in {input_dir}")
+        print(f"     Expected: ERA5_mean_train.npy, ERA5_std_train.npy")
+        print(f"     Skipping P99 computation in mm/day space")
+        print(f"     Training will use estimated P99 (less accurate)")
+
     # Create H_W metadata
     h_w = {"H": int(H_hr), "W": int(W_hr)}
     with open(metadata_dir / "H_W.json", 'w') as f:

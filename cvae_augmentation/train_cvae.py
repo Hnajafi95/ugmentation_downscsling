@@ -18,7 +18,7 @@ import csv
 from tqdm import tqdm
 
 from model_cvae import CVAE
-from losses import CVAELoss
+from losses import SimplifiedCVAELoss, MinimalCVAELoss
 from utils_metrics import MetricsTracker
 from data_io import get_dataloaders, load_thresholds
 
@@ -212,6 +212,13 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask)
         'beta': criterion.current_beta
     })
 
+    # Compute combined metric if configured
+    if 'combined_metric_weights' in config.get('train', {}):
+        weights = config['train']['combined_metric_weights']
+        combined = (weights.get('MAE_all', 0.5) * metrics['MAE_all'] +
+                    weights.get('MAE_tail', 0.5) * metrics['MAE_tail'])
+        metrics['combined_metric'] = combined
+
     return metrics
 
 
@@ -303,15 +310,90 @@ def main(args):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
 
+    # Load normalization parameters for simplified/minimal loss (needed for mm/day conversion)
+    if config['loss'].get('type') in ['simplified', 'minimal']:
+        print("\nLoading normalization parameters for mm/day conversion...")
+
+        # Try to load pre-computed normalization parameters
+        # These files are created by SRDRN/preprocessing.py in mydata_corrected/
+        # User should copy them to cVAE data directory
+        norm_dir = Path(config['data_root']) / "data" / "metadata"
+        mean_pr_path = norm_dir / "ERA5_mean_train.npy"
+        std_pr_path = norm_dir / "ERA5_std_train.npy"
+        p99_mmday_path = norm_dir / "p99_mmday.npy"
+
+        if mean_pr_path.exists() and std_pr_path.exists():
+            mean_pr = np.load(mean_pr_path)
+            std_pr = np.load(std_pr_path)
+            print(f"  ✓ Loaded ERA5_mean_train.npy and ERA5_std_train.npy from {norm_dir}")
+        else:
+            # Create dummy params (user should copy these from SRDRN preprocessing!)
+            print(f"  ⚠ WARNING: Normalization files not found in {norm_dir}")
+            print(f"  Expected files:")
+            print(f"    - ERA5_mean_train.npy")
+            print(f"    - ERA5_std_train.npy")
+            print(f"  These are created by SRDRN/preprocessing.py in mydata_corrected/")
+            print(f"  Copy them to {norm_dir} for accurate mm/day conversion")
+
+            H, W = config['model']['H'], config['model']['W']
+            mean_pr = np.zeros((H, W), dtype=np.float32)
+            std_pr = np.ones((H, W), dtype=np.float32)
+            print(f"  Using dummy normalization (zeros/ones) - results will be INACCURATE!")
+
+        # Load or compute P99 in mm/day space
+        if p99_mmday_path.exists():
+            p99_mmday = float(np.load(p99_mmday_path))
+            print(f"  ✓ Loaded P99 (mm/day) = {p99_mmday:.2f}")
+        else:
+            # Estimate from normalized P99 (rough approximation)
+            # P99_normalized = 4.26, convert to mm/day
+            p99_norm = thresholds.get('P99', 4.26)
+            # Rough estimate: exp(p99_norm * std + mean) - 1
+            # Using mean of std across space
+            p99_mmday = float(np.expm1(p99_norm * std_pr.mean() + mean_pr.mean()))
+            print(f"  Estimated P99 (mm/day) ≈ {p99_mmday:.2f} (from normalized P99={p99_norm:.2f})")
+            print(f"  For accurate results, compute and save p99_mmday.npy to {norm_dir}")
+
     # Create loss criterion
-    criterion = CVAELoss(
-        p95=p95,
-        lambda_base=config['loss']['lambda_base'],
-        lambda_ext=config['loss']['lambda_ext'],
-        lambda_mass=config['loss']['lambda_mass'],
-        beta_kl=config['loss']['beta_kl'],
-        warmup_epochs=config['loss']['warmup_epochs']
-    )
+    loss_type = config['loss'].get('type', 'simplified')
+
+    print(f"\nCreating loss criterion: {loss_type}")
+
+    if loss_type == 'simplified':
+        # Simplified loss: ONE weighted reconstruction + mass + KL (in mm/day space!)
+        criterion = SimplifiedCVAELoss(
+            p99_mmday=p99_mmday,
+            mean_pr=mean_pr,
+            std_pr=std_pr,
+            scale=config['loss'].get('scale', 36.6),
+            w_min=config['loss'].get('w_min', 0.1),
+            w_max=config['loss'].get('w_max', 2.0),
+            tail_boost=config['loss'].get('tail_boost', 1.5),
+            lambda_mass=config['loss'].get('lambda_mass', 0.01),
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs']
+        )
+        print(f"  Intensity weighting in mm/day space: scale={config['loss'].get('scale', 36.6)}, "
+              f"tail_boost={config['loss'].get('tail_boost', 1.5)}")
+
+    elif loss_type == 'minimal':
+        # Minimal loss: ONLY weighted reconstruction + KL (no mass conservation, in mm/day space!)
+        criterion = MinimalCVAELoss(
+            p99_mmday=p99_mmday,
+            mean_pr=mean_pr,
+            std_pr=std_pr,
+            scale=config['loss'].get('scale', 36.6),
+            tail_boost=config['loss'].get('tail_boost', 1.5),
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs']
+        )
+        print(f"  Minimal loss (2 terms only) in mm/day space: weighted_rec + KL")
+
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}. Use 'simplified' or 'minimal'.")
+
+    # Move criterion to device (important for SimplifiedCVAELoss with buffers!)
+    criterion = criterion.to(device)
 
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
@@ -325,7 +407,7 @@ def main(args):
     log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_kl',
                   'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_kl',
                   'val_MAE_all', 'val_MAE_tail', 'val_RMSE_all', 'val_mass_bias',
-                  'beta', 'lr']
+                  'beta', 'lr', 'val_combined_metric']
 
     with open(log_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=log_fields)
@@ -337,6 +419,10 @@ def main(args):
     print("\n" + "=" * 80)
     print("Starting training...")
     print("=" * 80)
+
+    # Get early stopping metric from config (default to MAE_all for stability)
+    early_stopping_metric = config['train'].get('early_stopping_metric', 'MAE_all')
+    print(f"Early stopping metric: {early_stopping_metric}")
 
     best_val_loss = float('inf')
     epochs_no_improve = 0
@@ -381,18 +467,20 @@ def main(args):
                     'val_RMSE_all': val_metrics['RMSE_all'],
                     'val_mass_bias': val_metrics['mass_bias'],
                     'beta': val_metrics['beta'],
-                    'lr': optimizer.param_groups[0]['lr']
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'val_combined_metric': val_metrics.get('combined_metric', '')
                 })
 
-            # Check for improvement
-            if val_metrics['L_rec'] < best_val_loss:
-                best_val_loss = val_metrics['L_rec']
+            # Check for improvement using configured metric
+            current_metric_value = val_metrics[early_stopping_metric]
+            if current_metric_value < best_val_loss:
+                best_val_loss = current_metric_value
                 epochs_no_improve = 0
 
                 # Save best checkpoint
                 best_path = checkpoints_dir / "cvae_best.pt"
                 save_checkpoint(model, optimizer, scheduler, epoch, val_metrics, best_path)
-                print(f"  Saved best model (val_L_rec={best_val_loss:.4f})")
+                print(f"  Saved best model ({early_stopping_metric}={best_val_loss:.4f})")
             else:
                 epochs_no_improve += 1
 
@@ -415,7 +503,7 @@ def main(args):
 
     print("\n" + "=" * 80)
     print("Training complete!")
-    print(f"Best validation L_rec: {best_val_loss:.4f}")
+    print(f"Best validation {early_stopping_metric}: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {checkpoints_dir}")
     print(f"Training log saved to: {log_file}")
     print("=" * 80)
