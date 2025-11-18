@@ -30,14 +30,15 @@ loss:
   type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
 
   # Intensity weighting - OPTIMIZED based on data analysis
-  # P90 = 11.7 mm/day, P99 = 43.6 mm/day
-  scale: 11.7         # Based on P90 percentile (was 36.6 - too high!)
+  # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
+  # Using P95 as scale (not P90 which was too aggressive)
+  scale: 20.0         # Based on P95 percentile - moderate emphasis
   w_min: 0.1          # Min weight for light rain
-  w_max: 3.0          # Increased from 2.0 to allow stronger extreme emphasis
+  w_max: 3.0          # Allow stronger extreme emphasis
 
   # Extra boost for extreme tail (P99+)
-  # With scale=11.7, P99 gets base weight=2.0, so effective=2.0*2.0=4.0 (40x vs light)
-  tail_boost: 2.0     # Increased from 1.5 for more emphasis on extremes
+  # With scale=20, P99 gets base weight=2.18, with tail_boost=2.0 → effective=4.36 (44x vs light)
+  tail_boost: 2.0     # Strong emphasis on P99+ extremes
 
   # Mass conservation (optional, small weight)
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
@@ -53,13 +54,19 @@ train:
   epochs: 150
   batch_size: 64
   num_workers: 2
-  lr: 0.0001
-  weight_decay: 0.0005  # Increased regularization
+  lr: 0.0003            # Increased from 0.0001 for faster convergence
+  weight_decay: 0.0005  # Regularization
   grad_clip: 1.0
   amp: true
   save_every: 10
-  early_stopping_patience: 40  # More patient
+
+  # Early stopping
+  early_stopping_patience: 40
   early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
+  early_stopping_min_delta: 0.001    # Minimum improvement to count
+
+  # LR warmup - gradually increase LR at start
+  lr_warmup_epochs: 5     # Warmup for first 5 epochs
 
   # Stratified sampling - ensures each batch has heavy precipitation days
   use_stratified_sampling: true   # Enable stratified batching

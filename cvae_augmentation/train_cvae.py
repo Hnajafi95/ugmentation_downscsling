@@ -77,6 +77,13 @@ def create_scheduler(optimizer, config):
     return scheduler, sched_type
 
 
+def get_warmup_lr(epoch, warmup_epochs, base_lr):
+    """Get learning rate with linear warmup."""
+    if epoch < warmup_epochs:
+        return base_lr * (epoch + 1) / warmup_epochs
+    return base_lr
+
+
 def train_epoch(model, train_loader, criterion, optimizer, scaler, device, config, epoch):
     """Train for one epoch."""
     model.train()
@@ -430,12 +437,24 @@ def main(args):
 
     # Get early stopping metric from config (default to MAE_all for stability)
     early_stopping_metric = config['train'].get('early_stopping_metric', 'MAE_all')
-    print(f"Early stopping metric: {early_stopping_metric}")
+    early_stopping_min_delta = config['train'].get('early_stopping_min_delta', 0.0)
+    print(f"Early stopping metric: {early_stopping_metric}, min_delta: {early_stopping_min_delta}")
+
+    # LR warmup settings
+    lr_warmup_epochs = config['train'].get('lr_warmup_epochs', 0)
+    base_lr = config['train']['lr']
+    if lr_warmup_epochs > 0:
+        print(f"LR warmup: {lr_warmup_epochs} epochs (0 → {base_lr})")
 
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
     for epoch in range(config['train']['epochs']):
+        # Apply LR warmup
+        if lr_warmup_epochs > 0 and epoch < lr_warmup_epochs:
+            warmup_lr = get_warmup_lr(epoch, lr_warmup_epochs, base_lr)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
         # Train
         train_metrics = train_epoch(
             model, train_loader, criterion, optimizer, scaler, device, config, epoch
@@ -479,9 +498,9 @@ def main(args):
                     'val_combined_metric': val_metrics.get('combined_metric', '')
                 })
 
-            # Check for improvement using configured metric
+            # Check for improvement using configured metric with min_delta
             current_metric_value = val_metrics[early_stopping_metric]
-            if current_metric_value < best_val_loss:
+            if current_metric_value < best_val_loss - early_stopping_min_delta:
                 best_val_loss = current_metric_value
                 epochs_no_improve = 0
 
@@ -491,6 +510,8 @@ def main(args):
                 print(f"  Saved best model ({early_stopping_metric}={best_val_loss:.4f})")
             else:
                 epochs_no_improve += 1
+                if epochs_no_improve > 0 and epochs_no_improve % 10 == 0:
+                    print(f"  No improvement for {epochs_no_improve} epochs (best={best_val_loss:.4f})")
 
             # Early stopping
             if epochs_no_improve >= config['train']['early_stopping_patience']:
