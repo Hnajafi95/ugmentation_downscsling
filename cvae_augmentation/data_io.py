@@ -8,9 +8,10 @@ as well as PyTorch Dataset classes for training.
 import numpy as np
 import json
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+import random
 
 
 def load_split(path: str) -> Dict[str, List[int]]:
@@ -148,6 +149,129 @@ def load_statics(root: str, use_land_sea: bool = True,
     return statics
 
 
+class StratifiedBatchSampler(Sampler):
+    """
+    Batch sampler that ensures each batch contains a minimum fraction of heavy precipitation days.
+
+    This helps the model see enough extreme events during training, which is critical
+    for improving skill on heavy rainfall prediction.
+    """
+
+    def __init__(self,
+                 day_ids: List[int],
+                 categories: Dict[str, str],
+                 batch_size: int,
+                 min_heavy_fraction: float = 0.2,
+                 drop_last: bool = False):
+        """
+        Args:
+            day_ids: List of day indices for this split
+            categories: Dict mapping day_id (str) to category
+            batch_size: Desired batch size
+            min_heavy_fraction: Minimum fraction of heavy days per batch (default 0.2 = 20%)
+            drop_last: Whether to drop the last incomplete batch
+        """
+        self.day_ids = day_ids
+        self.batch_size = batch_size
+        self.min_heavy_fraction = min_heavy_fraction
+        self.drop_last = drop_last
+
+        # Separate indices into heavy and non-heavy groups
+        self.heavy_indices = []
+        self.other_indices = []
+
+        for idx, day_id in enumerate(day_ids):
+            category = categories.get(str(day_id), 'dry')
+            if category in ['heavy_coast', 'heavy_interior']:
+                self.heavy_indices.append(idx)
+            else:
+                self.other_indices.append(idx)
+
+        # Calculate number of heavy samples per batch
+        self.n_heavy_per_batch = max(1, int(batch_size * min_heavy_fraction))
+        self.n_other_per_batch = batch_size - self.n_heavy_per_batch
+
+        # Handle case where there aren't enough heavy days
+        if len(self.heavy_indices) == 0:
+            print(f"[StratifiedBatchSampler] Warning: No heavy days found, using regular sampling")
+            self.n_heavy_per_batch = 0
+            self.n_other_per_batch = batch_size
+        elif len(self.heavy_indices) < self.n_heavy_per_batch:
+            print(f"[StratifiedBatchSampler] Warning: Only {len(self.heavy_indices)} heavy days, "
+                  f"will oversample to get {self.n_heavy_per_batch} per batch")
+
+        print(f"[StratifiedBatchSampler] {len(self.heavy_indices)} heavy days, "
+              f"{len(self.other_indices)} other days")
+        print(f"[StratifiedBatchSampler] Target: {self.n_heavy_per_batch} heavy + "
+              f"{self.n_other_per_batch} other per batch")
+
+    def __iter__(self):
+        # Shuffle both groups
+        heavy_indices = self.heavy_indices.copy()
+        other_indices = self.other_indices.copy()
+        random.shuffle(heavy_indices)
+        random.shuffle(other_indices)
+
+        batches = []
+        heavy_ptr = 0
+        other_ptr = 0
+
+        while True:
+            batch = []
+
+            # Add heavy samples (with potential oversampling)
+            for _ in range(self.n_heavy_per_batch):
+                if len(self.heavy_indices) > 0:
+                    if heavy_ptr >= len(heavy_indices):
+                        # Reshuffle heavy indices for oversampling
+                        random.shuffle(heavy_indices)
+                        heavy_ptr = 0
+                    batch.append(heavy_indices[heavy_ptr])
+                    heavy_ptr += 1
+
+            # Add other samples
+            for _ in range(self.n_other_per_batch):
+                if other_ptr >= len(other_indices):
+                    break
+                batch.append(other_indices[other_ptr])
+                other_ptr += 1
+
+            # Check if we have enough samples
+            if len(batch) == 0:
+                break
+
+            if len(batch) < self.batch_size:
+                if self.drop_last:
+                    break
+                # If not dropping last, include this incomplete batch
+                if len(batch) > 0:
+                    random.shuffle(batch)
+                    batches.append(batch)
+                break
+
+            random.shuffle(batch)
+            batches.append(batch)
+
+            # Check if we've used all other samples
+            if other_ptr >= len(other_indices):
+                break
+
+        # Shuffle batch order
+        random.shuffle(batches)
+
+        for batch in batches:
+            yield batch
+
+    def __len__(self):
+        if self.n_other_per_batch == 0:
+            return len(self.heavy_indices) // self.n_heavy_per_batch
+
+        n_batches = len(self.other_indices) // self.n_other_per_batch
+        if not self.drop_last and len(self.other_indices) % self.n_other_per_batch != 0:
+            n_batches += 1
+        return n_batches
+
+
 class CvaeDataset(Dataset):
     """
     PyTorch Dataset for cVAE training/validation.
@@ -269,7 +393,9 @@ def get_dataloaders(data_root: str,
                    use_land_sea: bool = True,
                    use_dist_coast: bool = True,
                    use_elevation: bool = False,
-                   normalize_statics: bool = True) -> Tuple[torch.utils.data.DataLoader, ...]:
+                   normalize_statics: bool = True,
+                   use_stratified_sampling: bool = False,
+                   min_heavy_fraction: float = 0.2) -> Tuple[torch.utils.data.DataLoader, ...]:
     """
     Create train, val, and test dataloaders.
 
@@ -281,6 +407,9 @@ def get_dataloaders(data_root: str,
         use_dist_coast: Include distance to coast
         use_elevation: Include elevation
         normalize_statics: Normalize static maps
+        use_stratified_sampling: Use stratified batch sampler for training
+                                 (ensures each batch has min_heavy_fraction heavy days)
+        min_heavy_fraction: Minimum fraction of heavy days per batch (default 0.2)
 
     Returns:
         train_loader, val_loader, test_loader
@@ -309,13 +438,35 @@ def get_dataloaders(data_root: str,
         normalize_statics=normalize_statics
     )
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True
-    )
+    # Create train loader (optionally with stratified sampling)
+    if use_stratified_sampling:
+        # Load categories for stratified sampling
+        categories_path = Path(data_root) / "data" / "metadata" / "categories.json"
+        categories = load_categories(categories_path)
+
+        # Create stratified batch sampler
+        batch_sampler = StratifiedBatchSampler(
+            day_ids=train_dataset.day_ids,
+            categories=categories,
+            batch_size=batch_size,
+            min_heavy_fraction=min_heavy_fraction,
+            drop_last=False
+        )
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    else:
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True
+        )
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset,

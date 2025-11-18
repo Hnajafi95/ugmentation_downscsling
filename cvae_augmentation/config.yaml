@@ -61,6 +61,10 @@ train:
   early_stopping_patience: 40  # More patient
   early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
 
+  # Stratified sampling - ensures each batch has heavy precipitation days
+  use_stratified_sampling: true   # Enable stratified batching
+  min_heavy_fraction: 0.2         # 20% of each batch will be heavy days
+
 # Learning rate scheduler
 scheduler:
   type: "cosine"

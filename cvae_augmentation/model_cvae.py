@@ -246,11 +246,18 @@ class Decoder(nn.Module):
         self.H = H
         self.W = W
 
-        # Calculate initial spatial dimensions
-        # We'll upsample 3 times (×2 each) to go from (H/8, W/8) to (H, W)
-        # H/8 ≈ 19, W/8 ≈ 16 (for H=156, W=132)
-        self.H_init = H // 8  # 19
-        self.W_init = W // 8  # 16
+        # Calculate initial spatial dimensions using ceiling division
+        # This ensures we can upsample to exact target dimensions
+        # For H=156, W=132: H_init=20, W_init=17
+        self.H_init = (H + 7) // 8  # ceil(156/8) = 20
+        self.W_init = (W + 7) // 8  # ceil(132/8) = 17
+
+        # Pre-compute intermediate sizes for exact upsampling
+        # (20, 17) → (39, 33) → (78, 66) → (156, 132)
+        self.H_step1 = (H + 3) // 4  # 39
+        self.W_step1 = (W + 3) // 4  # 33
+        self.H_step2 = (H + 1) // 2  # 78
+        self.W_step2 = (W + 1) // 2  # 66
 
         # Initial feature maps
         self.init_channels = base_filters * 8  # 512
@@ -260,19 +267,16 @@ class Decoder(nn.Module):
         self.fc1 = nn.Linear(input_dim, 512)
         self.fc2 = nn.Linear(512, self.init_channels * self.H_init * self.W_init)
 
-        # Decoder blocks with upsampling
-        # (B, 512, H/8, W/8) → (B, 256, H/4, W/4)
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # Decoder blocks with upsampling (using exact sizes, not scale_factor)
+        # (B, 512, H_init, W_init) → (B, 256, H_step1, W_step1)
         self.conv1 = nn.Conv2d(self.init_channels, base_filters * 4, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(base_filters * 4)
 
-        # (B, 256, H/4, W/4) → (B, 128, H/2, W/2)
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # (B, 256, H_step1, W_step1) → (B, 128, H_step2, W_step2)
         self.conv2 = nn.Conv2d(base_filters * 4, base_filters * 2, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
 
-        # (B, 128, H/2, W/2) → (B, 64, H, W)
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # (B, 128, H_step2, W_step2) → (B, 64, H, W)
         self.conv3 = nn.Conv2d(base_filters * 2, base_filters, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(base_filters)
 
@@ -298,27 +302,26 @@ class Decoder(nn.Module):
         h = self.relu(self.fc2(h))      # (B, init_channels * H_init * W_init)
 
         # Reshape to initial feature map
-        h = h.view(-1, self.init_channels, self.H_init, self.W_init)  # (B, 512, H/8, W/8)
+        h = h.view(-1, self.init_channels, self.H_init, self.W_init)  # (B, 512, 20, 17)
 
-        # Upsample blocks
-        h = self.up1(h)                 # (B, 512, H/4, W/4)
-        h = self.relu(self.bn1(self.conv1(h)))  # (B, 256, H/4, W/4)
+        # Upsample blocks with exact target sizes (no rounding errors)
+        # Step 1: (20, 17) → (39, 33)
+        h = F.interpolate(h, size=(self.H_step1, self.W_step1), mode='bilinear', align_corners=False)
+        h = self.relu(self.bn1(self.conv1(h)))  # (B, 256, 39, 33)
 
-        h = self.up2(h)                 # (B, 256, H/2, W/2)
-        h = self.relu(self.bn2(self.conv2(h)))  # (B, 128, H/2, W/2)
+        # Step 2: (39, 33) → (78, 66)
+        h = F.interpolate(h, size=(self.H_step2, self.W_step2), mode='bilinear', align_corners=False)
+        h = self.relu(self.bn2(self.conv2(h)))  # (B, 128, 78, 66)
 
-        h = self.up3(h)                 # (B, 128, H, W)
-        h = self.relu(self.bn3(self.conv3(h)))  # (B, 64, H, W)
+        # Step 3: (78, 66) → (156, 132)
+        h = F.interpolate(h, size=(self.H, self.W), mode='bilinear', align_corners=False)
+        h = self.relu(self.bn3(self.conv3(h)))  # (B, 64, 156, 132)
 
         # Output layer
-        Y_hat = self.conv_out(h)        # (B, 1, H, W)
+        Y_hat = self.conv_out(h)        # (B, 1, 156, 132)
 
         # Apply ReLU to ensure non-negative precipitation
         Y_hat = F.relu(Y_hat)
-
-        # Adjust to exact target size if needed (due to rounding in upsampling)
-        if Y_hat.shape[2] != self.H or Y_hat.shape[3] != self.W:
-            Y_hat = F.interpolate(Y_hat, size=(self.H, self.W), mode='bilinear', align_corners=False)
 
         return Y_hat
 
