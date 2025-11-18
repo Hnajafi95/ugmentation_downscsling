@@ -1,86 +1,85 @@
-# Configuration file for cVAE training and sampling
+# Simplified Configuration - Single Unified Loss Objective
+# Philosophy: ONE reconstruction loss (like SRDRN) + KL regularization
+# Avoids multi-objective trade-offs!
 
 # Data paths
 data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
-outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_simplified"
 
 # Static maps configuration
 statics:
   use_land_sea: true
   use_dist_coast: true
-  use_elevation: false  # Set to true if elevation data is available
-  normalize_statics: true  # Normalize distance to coast and elevation
+  use_elevation: false
+  normalize_statics: true
 
-# Model architecture
+# Model architecture - Reduced size
 model:
-  # Low-res encoder
-  d_x: 96                # Dimension of h_X embedding
-  in_channels_X: 6       # Number of input channels in X_lr (adjust based on your data)
+  d_x: 64
+  in_channels_X: 6
+  d_y: 256
+  in_channels_Y: 1
+  static_channels: 2
+  d_z: 64
+  H: 156
+  W: 132
+  base_filters: 64  # Reduced from 96 (less overfitting)
 
-  # High-res encoder
-  d_y: 384               # Dimension of h_Y embedding
-  in_channels_Y: 1       # Number of channels in Y_hr (precipitation only)
-
-  # Static channels (automatically determined from statics config)
-  # static_channels = use_land_sea + use_dist_coast + use_elevation
-  static_channels: 2     # land_sea + dist_coast
-
-  # Latent space
-  d_z: 96                # Dimension of latent z
-
-  # High-res grid dimensions (will be loaded from H_W.json)
-  H: 156                 # High-res height
-  W: 132                 # High-res width
-
-  # Base number of convolutional filters
-  base_filters: 96
-
-# Loss function weights
+# Loss function - SIMPLIFIED!
 loss:
-  lambda_base: 1.0       # Weight for base MAE
-  lambda_ext: 5.0        # Weight for extreme MAE (middle ground: was 10.0 originally, reduced for stability)
-  lambda_mass: 0.01      # Weight for mass conservation loss (increased from 0.001)
-  beta_kl: 0.01          # Final weight for KL divergence (REDUCED from 0.1 to prevent posterior collapse)
-  warmup_epochs: 15      # Number of epochs for KL warm-up (REDUCED from 30 to complete before early stopping)
-  p95_threshold: "from_thresholds_json"  # Will be loaded from data/metadata/thresholds.json
-  use_squared_error: false  # Use MSE instead of MAE for reconstruction (optional)
+  type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
+
+  # Intensity weighting (like SRDRN)
+  scale: 36.6         # Weighting scale (light rain: w=0.1, heavy rain: w=2.0)
+  w_min: 0.1          # Min weight
+  w_max: 2.0          # Max weight (20× more than light rain!)
+
+  # Extra boost for extreme tail (P99+)
+  tail_boost: 1.5     # 1.5 = 50% extra weight for P99+ pixels
+                      # 1.0 = no boost (just intensity weighting)
+                      # 2.0 = 100% extra weight
+
+  # Mass conservation (optional, small weight)
+  lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
+
+  # KL divergence (required for VAE)
+  beta_kl: 0.01       # Light regularization
+  warmup_epochs: 15   # KL warm-up
+
+  p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
 # Training configuration
 train:
-  epochs: 100            # Number of training epochs (increased to allow full training)
-  batch_size: 64         # Batch size (adjust based on GPU memory)
-  num_workers: 2         # Number of data loading workers
-  lr: 0.0001             # Learning rate (INCREASED from 0.00005 for faster convergence)
-  weight_decay: 0.0001   # Weight decay for AdamW optimizer
-  grad_clip: 1.0         # Gradient clipping threshold
-  amp: true              # Use automatic mixed precision (AMP)
-  save_every: 5          # Save checkpoint every N epochs
-  early_stopping_patience: 25  # Stop if no improvement for N epochs (increased from 20)
-  early_stopping_metric: "MAE_all"  # Metric to monitor: "MAE_all" (stable) or "L_rec" (volatile)
+  epochs: 150
+  batch_size: 64
+  num_workers: 2
+  lr: 0.0001
+  weight_decay: 0.0005  # Increased regularization
+  grad_clip: 1.0
+  amp: true
+  save_every: 10
+  early_stopping_patience: 40  # More patient
+  early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
 
 # Learning rate scheduler
 scheduler:
-  type: "cosine"         # "cosine", "plateau", or "step"
-  T_max: 80              # For cosine: max epochs
-  eta_min: 0.00001       # For cosine: minimum learning rate
-  factor: 0.5            # For plateau: reduction factor
-  patience: 5            # For plateau: patience
-  step_size: 20          # For step: step size
-  gamma: 0.5             # For step: gamma
+  type: "cosine"
+  T_max: 150
+  eta_min: 0.000001
 
-# Validation and logging
+# Validation
 validation:
-  val_every: 1           # Validate every N epochs
-  log_every: 50          # Log training metrics every N batches
+  val_every: 1
+  log_every: 50
 
-# Sampling configuration (for sample_cvae.py)
+# Sampling
 sampling:
-  mode: "posterior"      # "posterior" or "prior"
-  K: 2                   # Number of samples per day
-  days: "heavy_only"     # "heavy_only", "file:path/to/list.txt", "split:val", "split:train"
-  min_threshold: 0.1     # Minimum mass threshold (fraction of real day's mass)
-  temperature: 1.0       # Temperature for sampling (1.0 = no scaling)
+  mode: "posterior"
+  K: 5
+  days: "heavy_only"
+  min_threshold: 0.1
+  temperature: 1.0
 
-# Device configuration
-device: "cuda"           # "cuda" or "cpu"
-seed: 42                 # Random seed for reproducibility
+# Device
+device: "cuda"
+seed: 42

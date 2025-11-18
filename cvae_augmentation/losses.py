@@ -1,97 +1,183 @@
 """
-Loss functions for cVAE training.
+Simplified loss functions for cVAE training.
 
-Implements:
-1. Extreme-weighted MAE (reconstruction loss with emphasis on heavy precipitation)
-2. Mass/budget loss (preserve total precipitation over land)
-3. KL divergence (regularization for latent distribution)
+Philosophy: ONE unified reconstruction objective (like SRDRN)
+Instead of separate MAE_all + MAE_extreme, use intensity-weighted MAE
+that naturally emphasizes heavier precipitation.
+
+UPDATED: Now works in mm/day space like SRDRN for correct weighting!
+
+L_total = L_weighted_rec + β * L_kl
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 
-def extreme_weighted_mae(y_true, y_hat, p95, lambda_base=1.0, lambda_ext=3.0):
+def intensity_weighted_mae_mmday(y_true, y_hat, mean_pr, std_pr,
+                                  scale=36.6, w_min=0.1, w_max=2.0):
     """
-    Compute extreme-weighted MAE loss with per-sample normalization.
+    Intensity-weighted MAE in mm/day space (like SRDRN).
 
-    L_rec = λ_base * MAE_all + λ_ext * MAE_extreme
+    Works with normalized data by:
+    1. Denormalizing to log1p space: logp = y * std + mean
+    2. Converting to mm/day: mm = expm1(logp)
+    3. Computing weights in mm/day space: w = clip(mm_true / scale, w_min, w_max)
+    4. Computing weighted MAE
 
-    Where MAE_extreme focuses on pixels where y_true >= p95.
-    Uses per-sample averaging to reduce batch variance.
+    This ensures heavy rain (100 mm/day) gets weight ~2.0,
+    while light rain (1 mm/day) gets weight ~0.1.
 
     Args:
-        y_true: (B, 1, H, W) ground truth
-        y_hat: (B, 1, H, W) predictions
-        p95: Scalar threshold (e.g., 95th percentile from training data)
-        lambda_base: Weight for base MAE
-        lambda_ext: Weight for extreme MAE
+        y_true: (B, 1, H, W) ground truth (normalized)
+        y_hat: (B, 1, H, W) predictions (normalized)
+        mean_pr: (H, W) or (1, H, W) mean for denormalization
+        std_pr: (H, W) or (1, H, W) std for denormalization
+        scale: Scaling factor in mm/day (default 36.6, same as SRDRN)
+        w_min: Minimum weight (default 0.1)
+        w_max: Maximum weight (default 2.0)
 
     Returns:
-        loss: Scalar tensor
-        mae_base: Base MAE for logging
-        mae_ext: Extreme MAE for logging
+        loss: Scalar weighted MAE
+        weights_mean: Mean weight (for logging)
     """
-    # Base MAE over all pixels
-    mae_base = F.l1_loss(y_hat, y_true, reduction='mean')
+    # Ensure mean_pr and std_pr are tensors with correct shape
+    if isinstance(mean_pr, np.ndarray):
+        mean_pr = torch.from_numpy(mean_pr).float().to(y_true.device)
+    if isinstance(std_pr, np.ndarray):
+        std_pr = torch.from_numpy(std_pr).float().to(y_true.device)
 
-    # Create extreme mask
-    mask_ext = (y_true >= p95).float()  # (B, 1, H, W)
+    # Reshape to (1, 1, H, W) for broadcasting
+    if mean_pr.dim() == 2:
+        mean_pr = mean_pr.unsqueeze(0).unsqueeze(0)
+    elif mean_pr.dim() == 3:
+        mean_pr = mean_pr.unsqueeze(0)
 
-    # Per-sample extreme MAE to reduce variance
-    diff_ext = torch.abs(y_hat - y_true) * mask_ext  # (B, 1, H, W)
+    if std_pr.dim() == 2:
+        std_pr = std_pr.unsqueeze(0).unsqueeze(0)
+    elif std_pr.dim() == 3:
+        std_pr = std_pr.unsqueeze(0)
 
-    # Count extreme pixels per sample
-    n_ext_per_sample = mask_ext.sum(dim=(1, 2, 3))  # (B,)
+    # 1. Denormalize to log1p space
+    logp_true = y_true * std_pr + mean_pr
+    logp_hat = y_hat * std_pr + mean_pr
 
-    # Compute MAE per sample (only for samples with extreme pixels)
-    mae_ext_per_sample = []
-    for i in range(y_true.shape[0]):
-        if n_ext_per_sample[i] > 0:
-            mae_ext_sample = diff_ext[i].sum() / n_ext_per_sample[i]
-            mae_ext_per_sample.append(mae_ext_sample)
+    # 2. Convert to mm/day space
+    mm_true = torch.expm1(logp_true)  # expm1(x) = exp(x) - 1, inverse of log1p
+    mm_hat = torch.expm1(logp_hat)
 
-    # Average across samples that have extreme pixels
-    if len(mae_ext_per_sample) > 0:
-        mae_ext = torch.stack(mae_ext_per_sample).mean()
-    else:
-        # No extreme pixels in this batch
-        mae_ext = torch.tensor(0.0, device=y_true.device)
+    # 3. Compute intensity-based weights from TRUE mm/day values
+    weights = torch.clamp(mm_true / scale, min=w_min, max=w_max)
 
-    # Combined loss without ratio scaling
-    # The per-sample averaging already stabilizes the loss
-    loss = lambda_base * mae_base + lambda_ext * mae_ext
+    # 4. Compute weighted MAE in mm/day space
+    error_mm = torch.abs(mm_hat - mm_true)
+    weighted_error = weights * error_mm
 
-    return loss, mae_base, mae_ext
+    # Normalize by sum of weights
+    loss = weighted_error.sum() / (weights.sum() + 1e-8)
+
+    # For logging
+    weights_mean = weights.mean()
+
+    return loss, weights_mean
+
+
+def intensity_weighted_mae_with_tail_boost_mmday(y_true, y_hat, mean_pr, std_pr, p99_mmday,
+                                                   scale=36.6, w_min=0.1, w_max=2.0,
+                                                   tail_boost=1.5):
+    """
+    Enhanced version with extra boost for P99+ pixels (in mm/day space).
+
+    L = sum(w * boost * |mm_hat - mm_true|) / sum(w * boost)
+
+    where:
+        mm = expm1(y * std + mean)  [convert to mm/day]
+        w = clip(mm_true / scale, w_min, w_max)
+        boost = tail_boost if mm_true >= p99_mmday, else 1.0
+
+    This gives even MORE emphasis to extreme tail events (P99+).
+
+    Args:
+        y_true: (B, 1, H, W) ground truth (normalized)
+        y_hat: (B, 1, H, W) predictions (normalized)
+        mean_pr: (H, W) normalization mean
+        std_pr: (H, W) normalization std
+        p99_mmday: P99 threshold in mm/day space (not normalized!)
+        scale: Scaling factor
+        w_min, w_max: Weight bounds
+        tail_boost: Extra multiplier for P99+ pixels (default 1.5)
+
+    Returns:
+        loss: Scalar weighted MAE
+        info: Dict with logging info
+    """
+    # Ensure mean_pr and std_pr are tensors
+    if isinstance(mean_pr, np.ndarray):
+        mean_pr = torch.from_numpy(mean_pr).float().to(y_true.device)
+    if isinstance(std_pr, np.ndarray):
+        std_pr = torch.from_numpy(std_pr).float().to(y_true.device)
+
+    # Reshape for broadcasting
+    if mean_pr.dim() == 2:
+        mean_pr = mean_pr.unsqueeze(0).unsqueeze(0)
+    elif mean_pr.dim() == 3:
+        mean_pr = mean_pr.unsqueeze(0)
+
+    if std_pr.dim() == 2:
+        std_pr = std_pr.unsqueeze(0).unsqueeze(0)
+    elif std_pr.dim() == 3:
+        std_pr = std_pr.unsqueeze(0)
+
+    # Denormalize to mm/day
+    logp_true = y_true * std_pr + mean_pr
+    logp_hat = y_hat * std_pr + mean_pr
+    mm_true = torch.expm1(logp_true)
+    mm_hat = torch.expm1(logp_hat)
+
+    # Base intensity weights
+    weights = torch.clamp(mm_true / scale, min=w_min, max=w_max)
+
+    # Extra boost for P99+ pixels (in mm/day space)
+    tail_mask = (mm_true >= p99_mmday).float()
+    boost = 1.0 + (tail_boost - 1.0) * tail_mask
+
+    # Combined weighting
+    final_weights = weights * boost
+
+    # Weighted error in mm/day space
+    error_mm = torch.abs(mm_hat - mm_true)
+    weighted_error = final_weights * error_mm
+
+    # Normalize
+    loss = weighted_error.sum() / (final_weights.sum() + 1e-8)
+
+    # Info for logging
+    info = {
+        'weights_mean': weights.mean().item(),
+        'boost_mean': boost.mean().item(),
+        'n_tail_pixels': tail_mask.sum().item(),
+        'mm_true_max': mm_true.max().item(),
+        'mm_true_mean': mm_true.mean().item()
+    }
+
+    return loss, info
 
 
 def mass_loss(y_true, y_hat, land_mask):
     """
-    Compute mass/budget loss: absolute difference in total precipitation over land.
+    Mass conservation loss (keep this for physical consistency).
 
-    L_mass = |sum_land(y_true) - sum_land(y_hat)|
-
-    Args:
-        y_true: (B, 1, H, W) ground truth
-        y_hat: (B, 1, H, W) predictions
-        land_mask: (B, 1, H, W) or (1, H, W) land mask (1=land, 0=sea)
-
-    Returns:
-        loss: Scalar tensor (mean absolute mass difference per sample)
+    L_mass = mean(|sum_land(y_true) - sum_land(y_hat)|)
     """
-    # Ensure land_mask is broadcastable
     if land_mask.dim() == 3:
-        land_mask = land_mask.unsqueeze(0)  # (1, 1, H, W)
+        land_mask = land_mask.unsqueeze(0)
 
-    # Compute total mass over land for each sample
-    mass_true = (y_true * land_mask).sum(dim=(1, 2, 3))  # (B,)
-    mass_hat = (y_hat * land_mask).sum(dim=(1, 2, 3))    # (B,)
+    mass_true = (y_true * land_mask).sum(dim=(1, 2, 3))
+    mass_hat = (y_hat * land_mask).sum(dim=(1, 2, 3))
 
-    # Absolute difference
-    mass_diff = torch.abs(mass_true - mass_hat)  # (B,)
-
-    # Mean over batch
+    mass_diff = torch.abs(mass_true - mass_hat)
     loss = mass_diff.mean()
 
     return loss
@@ -99,168 +185,252 @@ def mass_loss(y_true, y_hat, land_mask):
 
 def kl_divergence(mu, logvar):
     """
-    Compute KL divergence between N(mu, exp(logvar)) and N(0, I).
+    KL divergence (required for VAE).
 
     KL(q(z|x) || p(z)) = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
-
-    Args:
-        mu: (B, d_z) mean
-        logvar: (B, d_z) log variance
-
-    Returns:
-        kl_loss: Scalar tensor (mean over batch and dimensions)
     """
-    # KL divergence formula
-    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)  # (B,)
-
-    # Mean over batch
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
     kl_loss = kl.mean()
-
     return kl_loss
 
 
-class CVAELoss(nn.Module):
+class SimplifiedCVAELoss(nn.Module):
     """
-    Combined loss for cVAE training.
+    Simplified cVAE loss with ONE unified reconstruction objective.
 
-    L_total = L_rec + λ_mass * L_mass + β * L_kl
+    L_total = L_weighted_rec + λ_mass * L_mass + β * L_kl
 
-    Where:
-    - L_rec is extreme-weighted MAE
-    - L_mass is mass conservation loss
-    - L_kl is KL divergence
+    Where L_weighted_rec is a SINGLE intensity-weighted MAE that
+    automatically emphasizes heavy precipitation (like SRDRN).
 
-    Supports KL warm-up schedule.
+    UPDATED: Now works in mm/day space for correct weighting!
+
+    This avoids the multi-objective optimization problem!
     """
 
     def __init__(self,
-                 p95: float,
-                 lambda_base: float = 1.0,
-                 lambda_ext: float = 3.0,
-                 lambda_mass: float = 0.1,
-                 beta_kl: float = 0.5,
-                 warmup_epochs: int = 10):
+                 p99_mmday: float,
+                 mean_pr,
+                 std_pr,
+                 scale: float = 36.6,
+                 w_min: float = 0.1,
+                 w_max: float = 2.0,
+                 tail_boost: float = 1.5,
+                 lambda_mass: float = 0.01,
+                 beta_kl: float = 0.01,
+                 warmup_epochs: int = 15):
         """
         Args:
-            p95: Threshold for extreme precipitation (from thresholds.json)
-            lambda_base: Weight for base MAE
-            lambda_ext: Weight for extreme MAE
-            lambda_mass: Weight for mass loss
-            beta_kl: Final weight for KL divergence
-            warmup_epochs: Number of epochs to warm up KL weight from 0 to beta_kl
+            p99_mmday: P99 threshold in mm/day space (not normalized!)
+            mean_pr: (H, W) normalization mean for denormalization
+            std_pr: (H, W) normalization std for denormalization
+            scale: Intensity weighting scale in mm/day (default 36.6, same as SRDRN)
+                   - Same scale works because we denormalize to mm/day first!
+            w_min, w_max: Weight bounds
+            tail_boost: Extra multiplier for P99+ (default 1.5)
+            lambda_mass: Weight for mass conservation (keep small)
+            beta_kl: Final KL weight (required for VAE)
+            warmup_epochs: KL warmup epochs
         """
         super().__init__()
 
-        self.p95 = p95
-        self.lambda_base = lambda_base
-        self.lambda_ext = lambda_ext
+        self.p99_mmday = p99_mmday
+        self.scale = scale
+        self.w_min = w_min
+        self.w_max = w_max
+        self.tail_boost = tail_boost
         self.lambda_mass = lambda_mass
         self.beta_kl = beta_kl
         self.warmup_epochs = warmup_epochs
+
+        # Store normalization parameters
+        if isinstance(mean_pr, np.ndarray):
+            mean_pr = torch.from_numpy(mean_pr).float()
+        if isinstance(std_pr, np.ndarray):
+            std_pr = torch.from_numpy(std_pr).float()
+
+        self.register_buffer('mean_pr', mean_pr)
+        self.register_buffer('std_pr', std_pr)
 
         self.current_epoch = 0
         self.current_beta = 0.0
 
     def update_beta(self, epoch):
-        """
-        Update KL weight based on current epoch (for warm-up).
-
-        Args:
-            epoch: Current epoch (0-indexed)
-        """
+        """Update KL weight (warm-up schedule)."""
         self.current_epoch = epoch
 
         if epoch < self.warmup_epochs:
-            # Linear warm-up
             self.current_beta = self.beta_kl * (epoch / self.warmup_epochs)
         else:
             self.current_beta = self.beta_kl
 
     def forward(self, y_true, y_hat, mu, logvar, land_mask):
         """
-        Compute total loss.
+        Compute simplified loss in mm/day space.
 
         Args:
-            y_true: (B, 1, H, W) ground truth
-            y_hat: (B, 1, H, W) predictions
-            mu: (B, d_z) latent mean
-            logvar: (B, d_z) latent log variance
-            land_mask: (B, 1, H, W) or (1, H, W) land mask
+            y_true: (B, 1, H, W) normalized precipitation
+            y_hat: (B, 1, H, W) normalized predictions
+            mu: (B, d_z)
+            logvar: (B, d_z)
+            land_mask: (B, 1, H, W) or (1, 1, H, W)
 
         Returns:
-            loss_dict: Dictionary with all loss components
+            loss_dict: All loss components
         """
-        # Reconstruction loss
-        rec_loss, mae_base, mae_ext = extreme_weighted_mae(
-            y_true, y_hat, self.p95, self.lambda_base, self.lambda_ext
+        # 1. Weighted reconstruction loss in mm/day space (ONE unified objective!)
+        rec_loss, rec_info = intensity_weighted_mae_with_tail_boost_mmday(
+            y_true, y_hat, self.mean_pr, self.std_pr, self.p99_mmday,
+            self.scale, self.w_min, self.w_max, self.tail_boost
         )
 
-        # Mass loss
+        # 2. Mass conservation (optional, but good for physical consistency)
         m_loss = mass_loss(y_true, y_hat, land_mask)
 
-        # KL loss
+        # 3. KL divergence (required for VAE)
         kl_loss = kl_divergence(mu, logvar)
 
-        # Total loss
+        # Total loss (ONLY 3 TERMS instead of 4+!)
         total_loss = rec_loss + self.lambda_mass * m_loss + self.current_beta * kl_loss
 
-        # Return all components for logging
+        # For logging
         loss_dict = {
             'loss': total_loss,
             'L_rec': rec_loss,
-            'L_base': mae_base,
-            'L_ext': mae_ext,
             'L_mass': m_loss,
             'L_kl': kl_loss,
-            'beta': self.current_beta
+            'beta': self.current_beta,
+            'weights_mean': rec_info['weights_mean'],
+            'n_tail_pixels': rec_info['n_tail_pixels'],
+            'mm_true_max': rec_info['mm_true_max'],
+            'mm_true_mean': rec_info['mm_true_mean']
+        }
+
+        return loss_dict
+
+
+class MinimalCVAELoss(nn.Module):
+    """
+    MINIMAL loss: Just weighted reconstruction + KL.
+
+    L_total = L_weighted_rec + β * L_kl
+
+    UPDATED: Now works in mm/day space like SRDRN!
+
+    Most similar to standard supervised learning.
+    Remove mass conservation if you want absolute minimum complexity.
+    """
+
+    def __init__(self,
+                 p99_mmday: float,
+                 mean_pr,
+                 std_pr,
+                 scale: float = 36.6,
+                 tail_boost: float = 1.5,
+                 beta_kl: float = 0.01,
+                 warmup_epochs: int = 15):
+        super().__init__()
+
+        self.p99_mmday = p99_mmday
+        self.scale = scale
+        self.tail_boost = tail_boost
+        self.beta_kl = beta_kl
+        self.warmup_epochs = warmup_epochs
+
+        # Store normalization parameters
+        if isinstance(mean_pr, np.ndarray):
+            mean_pr = torch.from_numpy(mean_pr).float()
+        if isinstance(std_pr, np.ndarray):
+            std_pr = torch.from_numpy(std_pr).float()
+
+        self.register_buffer('mean_pr', mean_pr)
+        self.register_buffer('std_pr', std_pr)
+
+        self.current_epoch = 0
+        self.current_beta = 0.0
+
+    def update_beta(self, epoch):
+        self.current_epoch = epoch
+        if epoch < self.warmup_epochs:
+            self.current_beta = self.beta_kl * (epoch / self.warmup_epochs)
+        else:
+            self.current_beta = self.beta_kl
+
+    def forward(self, y_true, y_hat, mu, logvar, land_mask=None):
+        """
+        Minimal loss computation in mm/day space.
+
+        Only TWO terms: reconstruction + KL!
+        """
+        # Weighted reconstruction in mm/day space
+        rec_loss, rec_info = intensity_weighted_mae_with_tail_boost_mmday(
+            y_true, y_hat, self.mean_pr, self.std_pr, self.p99_mmday,
+            self.scale, 0.1, 2.0, self.tail_boost
+        )
+
+        # KL divergence
+        kl_loss = kl_divergence(mu, logvar)
+
+        # Total loss (ONLY 2 TERMS!)
+        total_loss = rec_loss + self.current_beta * kl_loss
+
+        loss_dict = {
+            'loss': total_loss,
+            'L_rec': rec_loss,
+            'L_kl': kl_loss,
+            'beta': self.current_beta,
+            'weights_mean': rec_info['weights_mean'],
+            'mm_true_max': rec_info['mm_true_max']
         }
 
         return loss_dict
 
 
 def test_losses():
-    """
-    Unit test for loss functions.
-    """
-    print("Testing loss functions...")
+    """Test the simplified losses."""
+    print("Testing simplified losses...")
 
-    # Create dummy data
+    # Dummy data
     B, H, W = 4, 156, 132
-    y_true = torch.randn(B, 1, H, W).abs()  # Non-negative
-    y_hat = torch.randn(B, 1, H, W).abs()
+    y_true = torch.randn(B, 1, H, W).abs() * 10  # 0-10 mm/day
+    y_hat = y_true + torch.randn(B, 1, H, W) * 0.5
     land_mask = torch.ones(1, 1, H, W)
     mu = torch.randn(B, 64)
     logvar = torch.randn(B, 64)
 
-    p95 = float(torch.quantile(y_true, 0.95))
+    p99 = float(torch.quantile(y_true, 0.99))
 
-    # Test extreme-weighted MAE
-    rec_loss, mae_base, mae_ext = extreme_weighted_mae(y_true, y_hat, p95)
-    print(f"Reconstruction loss: {rec_loss.item():.4f}")
-    print(f"  MAE_base: {mae_base.item():.4f}")
-    print(f"  MAE_ext: {mae_ext.item():.4f}")
+    # Test intensity-weighted MAE
+    print("\n1. Intensity-weighted MAE:")
+    loss, weights_mean = intensity_weighted_mae(y_true, y_hat)
+    print(f"   Loss: {loss.item():.4f}")
+    print(f"   Mean weight: {weights_mean.item():.4f}")
 
-    # Test mass loss
-    m_loss = mass_loss(y_true, y_hat, land_mask)
-    print(f"Mass loss: {m_loss.item():.4f}")
+    # Test with tail boost
+    print("\n2. With tail boost:")
+    loss, info = intensity_weighted_mae_with_tail_boost(y_true, y_hat, p99)
+    print(f"   Loss: {loss.item():.4f}")
+    print(f"   Tail pixels: {info['n_tail_pixels']}")
 
-    # Test KL divergence
-    kl_loss = kl_divergence(mu, logvar)
-    print(f"KL loss: {kl_loss.item():.4f}")
-
-    # Test combined loss
-    criterion = CVAELoss(p95=p95, warmup_epochs=5)
-    criterion.update_beta(epoch=0)
+    # Test simplified criterion
+    print("\n3. Simplified criterion:")
+    criterion = SimplifiedCVAELoss(p99=p99)
+    criterion.update_beta(epoch=10)
     loss_dict = criterion(y_true, y_hat, mu, logvar, land_mask)
-    print(f"Total loss (epoch 0): {loss_dict['loss'].item():.4f}")
-    print(f"  Beta: {loss_dict['beta']:.4f}")
+    print(f"   Total loss: {loss_dict['loss'].item():.4f}")
+    print(f"   L_rec: {loss_dict['L_rec'].item():.4f}")
+    print(f"   L_kl: {loss_dict['L_kl'].item():.4f}")
 
-    criterion.update_beta(epoch=5)
-    loss_dict = criterion(y_true, y_hat, mu, logvar, land_mask)
-    print(f"Total loss (epoch 5): {loss_dict['loss'].item():.4f}")
-    print(f"  Beta: {loss_dict['beta']:.4f}")
+    # Test minimal criterion
+    print("\n4. Minimal criterion (2 terms only):")
+    criterion = MinimalCVAELoss(p99=p99)
+    criterion.update_beta(epoch=10)
+    loss_dict = criterion(y_true, y_hat, mu, logvar)
+    print(f"   Total loss: {loss_dict['loss'].item():.4f}")
+    print(f"   L_rec: {loss_dict['L_rec'].item():.4f}")
+    print(f"   L_kl: {loss_dict['L_kl'].item():.4f}")
 
-    print("All loss tests passed!")
+    print("\n✓ All tests passed!")
 
 
 if __name__ == "__main__":

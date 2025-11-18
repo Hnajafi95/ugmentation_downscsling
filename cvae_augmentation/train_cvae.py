@@ -18,8 +18,7 @@ import csv
 from tqdm import tqdm
 
 from model_cvae import CVAE
-from losses import CVAELoss
-from losses_simplified import SimplifiedCVAELoss, MinimalCVAELoss
+from losses import SimplifiedCVAELoss, MinimalCVAELoss
 from utils_metrics import MetricsTracker
 from data_io import get_dataloaders, load_thresholds
 
@@ -356,7 +355,7 @@ def main(args):
             print(f"  For accurate results, compute and save p99_mmday.npy to {norm_dir}")
 
     # Create loss criterion
-    loss_type = config['loss'].get('type', 'original')
+    loss_type = config['loss'].get('type', 'simplified')
 
     print(f"\nCreating loss criterion: {loss_type}")
 
@@ -391,17 +390,7 @@ def main(args):
         print(f"  Minimal loss (2 terms only) in mm/day space: weighted_rec + KL")
 
     else:
-        # Original multi-objective loss
-        criterion = CVAELoss(
-            p95=p95,
-            lambda_base=config['loss']['lambda_base'],
-            lambda_ext=config['loss']['lambda_ext'],
-            lambda_mass=config['loss']['lambda_mass'],
-            beta_kl=config['loss']['beta_kl'],
-            warmup_epochs=config['loss']['warmup_epochs']
-        )
-        print(f"  Original loss: lambda_base={config['loss']['lambda_base']}, "
-              f"lambda_ext={config['loss']['lambda_ext']}")
+        raise ValueError(f"Unknown loss type: {loss_type}. Use 'simplified' or 'minimal'.")
 
     # Move criterion to device (important for SimplifiedCVAELoss with buffers!)
     criterion = criterion.to(device)
