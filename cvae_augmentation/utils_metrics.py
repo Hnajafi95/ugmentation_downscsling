@@ -19,7 +19,7 @@ def compute_mae(y_true, y_hat, mask=None):
     Args:
         y_true: (B, 1, H, W) or (B, H, W) ground truth
         y_hat: (B, 1, H, W) or (B, H, W) predictions
-        mask: Optional (B, 1, H, W) or (1, H, W) mask (1=include, 0=exclude)
+        mask: Optional (B, 1, H, W) or (1, 1, H, W) mask (1=include, 0=exclude)
 
     Returns:
         mae: Scalar float
@@ -34,7 +34,9 @@ def compute_mae(y_true, y_hat, mask=None):
     diff = np.abs(y_true - y_hat)
 
     if mask is not None:
-        # Apply mask
+        # Broadcast mask to match data shape if needed
+        if mask.shape[0] == 1 and diff.shape[0] > 1:
+            mask = np.broadcast_to(mask, diff.shape)
         mask = mask.astype(bool)
         diff_masked = diff[mask]
         if len(diff_masked) > 0:
@@ -54,7 +56,7 @@ def compute_rmse(y_true, y_hat, mask=None):
     Args:
         y_true: (B, 1, H, W) or (B, H, W) ground truth
         y_hat: (B, 1, H, W) or (B, H, W) predictions
-        mask: Optional (B, 1, H, W) or (1, H, W) mask
+        mask: Optional (B, 1, H, W) or (1, 1, H, W) mask
 
     Returns:
         rmse: Scalar float
@@ -69,6 +71,9 @@ def compute_rmse(y_true, y_hat, mask=None):
     sq_diff = (y_true - y_hat) ** 2
 
     if mask is not None:
+        # Broadcast mask to match data shape if needed
+        if mask.shape[0] == 1 and sq_diff.shape[0] > 1:
+            mask = np.broadcast_to(mask, sq_diff.shape)
         mask = mask.astype(bool)
         sq_diff_masked = sq_diff[mask]
         if len(sq_diff_masked) > 0:
@@ -90,7 +95,7 @@ def compute_tail_mae(y_true, y_hat, threshold, mask=None):
         y_true: (B, 1, H, W) or (B, H, W) ground truth
         y_hat: (B, 1, H, W) or (B, H, W) predictions
         threshold: Scalar threshold (e.g., P95)
-        mask: Optional (B, 1, H, W) or (1, H, W) mask
+        mask: Optional (B, 1, H, W) or (1, 1, H, W) mask
 
     Returns:
         tail_mae: Scalar float (or 0.0 if no tail values)
@@ -107,6 +112,9 @@ def compute_tail_mae(y_true, y_hat, threshold, mask=None):
 
     # Combine with optional mask
     if mask is not None:
+        # Broadcast mask to match data shape if needed
+        if mask.shape[0] == 1 and y_true.shape[0] > 1:
+            mask = np.broadcast_to(mask, y_true.shape)
         mask = mask.astype(bool)
         tail_mask = tail_mask & mask
 
@@ -132,7 +140,7 @@ def compute_mass_bias(y_true, y_hat, land_mask):
     Args:
         y_true: (B, 1, H, W) or (B, H, W) ground truth
         y_hat: (B, 1, H, W) or (B, H, W) predictions
-        land_mask: (B, 1, H, W) or (1, H, W) land mask
+        land_mask: (B, 1, H, W) or (1, 1, H, W) land mask
 
     Returns:
         mass_bias: Scalar float (total bias over all samples)
@@ -147,6 +155,10 @@ def compute_mass_bias(y_true, y_hat, land_mask):
     # Ensure land_mask is broadcastable
     if land_mask.ndim == 3:
         land_mask = land_mask[np.newaxis, :]
+
+    # Broadcast mask to match data shape if needed (for proper multiplication)
+    if land_mask.shape[0] == 1 and y_true.shape[0] > 1:
+        land_mask = np.broadcast_to(land_mask, y_true.shape)
 
     # Compute total mass over land
     mass_true = np.sum(y_true * land_mask)
