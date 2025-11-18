@@ -77,6 +77,13 @@ def create_scheduler(optimizer, config):
     return scheduler, sched_type
 
 
+def get_warmup_lr(epoch, warmup_epochs, base_lr):
+    """Get learning rate with linear warmup."""
+    if epoch < warmup_epochs:
+        return base_lr * (epoch + 1) / warmup_epochs
+    return base_lr
+
+
 def train_epoch(model, train_loader, criterion, optimizer, scaler, device, config, epoch):
     """Train for one epoch."""
     model.train()
@@ -154,7 +161,8 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
     return metrics
 
 
-def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask):
+def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
+                   mean_pr=None, std_pr=None, p95_mmday=None):
     """Validate for one epoch."""
     model.eval()
 
@@ -164,8 +172,8 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask)
     total_kl = 0.0
     n_batches = 0
 
-    # Initialize metrics tracker
-    metrics_tracker = MetricsTracker(p95, land_mask)
+    # Initialize metrics tracker (with mm/day support if params provided)
+    metrics_tracker = MetricsTracker(p95, land_mask, mean_pr, std_pr, p95_mmday)
 
     pbar = tqdm(val_loader, desc="Validation")
 
@@ -318,6 +326,11 @@ def main(args):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
 
+    # Initialize mm/day conversion params (for metrics alignment)
+    mean_pr = None
+    std_pr = None
+    p95_mmday = None
+
     # Load normalization parameters for simplified/minimal loss (needed for mm/day conversion)
     if config['loss'].get('type') in ['simplified', 'minimal']:
         print("\nLoading normalization parameters for mm/day conversion...")
@@ -361,6 +374,11 @@ def main(args):
             p99_mmday = float(np.expm1(p99_norm * std_pr.mean() + mean_pr.mean()))
             print(f"  Estimated P99 (mm/day) ≈ {p99_mmday:.2f} (from normalized P99={p99_norm:.2f})")
             print(f"  For accurate results, compute and save p99_mmday.npy to {norm_dir}")
+
+        # Compute P95 in mm/day space for metrics alignment
+        p95_norm = thresholds.get('P95', 3.80)
+        p95_mmday = float(np.expm1(p95_norm * std_pr.mean() + mean_pr.mean()))
+        print(f"  Estimated P95 (mm/day) ≈ {p95_mmday:.2f} (for metrics alignment)")
 
     # Create loss criterion
     loss_type = config['loss'].get('type', 'simplified')
@@ -415,6 +433,7 @@ def main(args):
     log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_kl',
                   'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_kl',
                   'val_MAE_all', 'val_MAE_tail', 'val_RMSE_all', 'val_mass_bias',
+                  'val_MAE_all_zspace', 'val_MAE_tail_zspace',
                   'beta', 'lr', 'val_combined_metric']
 
     with open(log_file, 'w', newline='') as f:
@@ -430,12 +449,24 @@ def main(args):
 
     # Get early stopping metric from config (default to MAE_all for stability)
     early_stopping_metric = config['train'].get('early_stopping_metric', 'MAE_all')
-    print(f"Early stopping metric: {early_stopping_metric}")
+    early_stopping_min_delta = config['train'].get('early_stopping_min_delta', 0.0)
+    print(f"Early stopping metric: {early_stopping_metric}, min_delta: {early_stopping_min_delta}")
+
+    # LR warmup settings
+    lr_warmup_epochs = config['train'].get('lr_warmup_epochs', 0)
+    base_lr = config['train']['lr']
+    if lr_warmup_epochs > 0:
+        print(f"LR warmup: {lr_warmup_epochs} epochs (0 → {base_lr})")
 
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
     for epoch in range(config['train']['epochs']):
+        # Apply LR warmup
+        if lr_warmup_epochs > 0 and epoch < lr_warmup_epochs:
+            warmup_lr = get_warmup_lr(epoch, lr_warmup_epochs, base_lr)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
         # Train
         train_metrics = train_epoch(
             model, train_loader, criterion, optimizer, scaler, device, config, epoch
@@ -444,7 +475,8 @@ def main(args):
         # Validate
         if (epoch + 1) % config['validation']['val_every'] == 0:
             val_metrics = validate_epoch(
-                model, val_loader, criterion, device, config, p95, land_mask
+                model, val_loader, criterion, device, config, p95, land_mask,
+                mean_pr=mean_pr, std_pr=std_pr, p95_mmday=p95_mmday
             )
 
             # Print metrics
@@ -474,14 +506,16 @@ def main(args):
                     'val_MAE_tail': val_metrics['MAE_tail'],
                     'val_RMSE_all': val_metrics['RMSE_all'],
                     'val_mass_bias': val_metrics['mass_bias'],
+                    'val_MAE_all_zspace': val_metrics.get('MAE_all_zspace', ''),
+                    'val_MAE_tail_zspace': val_metrics.get('MAE_tail_zspace', ''),
                     'beta': val_metrics['beta'],
                     'lr': optimizer.param_groups[0]['lr'],
                     'val_combined_metric': val_metrics.get('combined_metric', '')
                 })
 
-            # Check for improvement using configured metric
+            # Check for improvement using configured metric with min_delta
             current_metric_value = val_metrics[early_stopping_metric]
-            if current_metric_value < best_val_loss:
+            if current_metric_value < best_val_loss - early_stopping_min_delta:
                 best_val_loss = current_metric_value
                 epochs_no_improve = 0
 
@@ -491,6 +525,8 @@ def main(args):
                 print(f"  Saved best model ({early_stopping_metric}={best_val_loss:.4f})")
             else:
                 epochs_no_improve += 1
+                if epochs_no_improve > 0 and epochs_no_improve % 10 == 0:
+                    print(f"  No improvement for {epochs_no_improve} epochs (best={best_val_loss:.4f})")
 
             # Early stopping
             if epochs_no_improve >= config['train']['early_stopping_patience']:
