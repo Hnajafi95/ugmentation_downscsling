@@ -63,10 +63,14 @@ def generate_samples(model, dataset, num_days=50, samples_per_day=5, device='cud
     with open(categories_path, 'r') as f:
         categories = json.load(f)
 
+    # Categories format is {day_id: category_name}
     heavy_indices = []
-    for cat in ['heavy_coast', 'heavy_interior']:
-        if cat in categories:
-            heavy_indices.extend(categories[cat])
+    for day_id_str, category in categories.items():
+        if category in ["heavy_coast", "heavy_interior"]:
+            heavy_indices.append(int(day_id_str))
+
+    heavy_indices.sort()
+    print(f"Found {len(heavy_indices)} heavy precipitation days")
 
     # Limit to num_days
     heavy_indices = heavy_indices[:num_days]
