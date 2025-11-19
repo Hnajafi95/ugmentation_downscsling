@@ -225,12 +225,15 @@ def create_augmented_dataset(original_predictors, original_obs,
         augmented_dates = synth_dates
 
     # Create augmented time coordinates
-    # For synthetic samples, use the timestamp from the source day
+    # For synthetic samples, use a marker timestamp to distinguish them from real data
+    # Synthetic samples don't have real historical timestamps since they're augmentations
     original_time_coords = metadata.get('train_time_coords.npy', None)
     if original_time_coords is not None:
-        # Map day_id to timestamp from original training data
-        # Note: day_ids from cVAE are indices into the train split (0-9927)
-        synth_time_coords = np.array([original_time_coords[day_id] for day_id in day_ids])
+        # Create marker timestamps for synthetic samples
+        # Use a far-future date that's clearly synthetic: 2099-01-01 + sample offset
+        base_synth_date = np.datetime64('2099-01-01')
+        synth_time_coords = np.array([base_synth_date + np.timedelta64(i, 'D')
+                                      for i in range(len(day_ids))], dtype='datetime64[D]')
         augmented_time_coords = np.concatenate([original_time_coords, synth_time_coords])
     else:
         augmented_time_coords = None
@@ -254,10 +257,12 @@ def save_augmented_dataset(output_dir, augmented_pred, augmented_obs,
     np.save(output_dir / "train_indices.npy", augmented_indices)
     np.save(output_dir / "train_dates.npy", augmented_dates)
 
-    # Save augmented time coordinates
+    # Save augmented time coordinates (ensure datetime64 dtype as in preprocessing.py)
     if augmented_time_coords is not None:
-        np.save(output_dir / "train_time_coords.npy", augmented_time_coords)
-        np.save(output_dir / "high_res_train_time_coords.npy", augmented_time_coords)
+        # Explicitly convert to datetime64 dtype to match preprocessing.py format
+        time_coords_dt64 = augmented_time_coords.astype('datetime64')
+        np.save(output_dir / "train_time_coords.npy", time_coords_dt64)
+        np.save(output_dir / "high_res_train_time_coords.npy", time_coords_dt64)
 
     # Copy over other metadata files unchanged (excluding train time coords which are augmented above)
     copy_files = [
@@ -288,6 +293,7 @@ def save_augmented_dataset(output_dir, augmented_pred, augmented_obs,
         'synthetic_samples': int(synth_n),
         'total_samples': int(original_n + synth_n),
         'augmentation_ratio': float(synth_n / original_n) if original_n > 0 else 0,
+        'note': 'Synthetic samples have marker timestamps (2099-01-01+) to distinguish from real data',
     }
 
     with open(output_dir / "augmentation_info.json", 'w') as f:
