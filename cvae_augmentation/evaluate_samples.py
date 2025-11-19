@@ -274,7 +274,7 @@ def evaluate_model(model, dataset, device='cuda', num_days=50, samples_per_day=5
         'extreme_distribution': {
             'ks_statistic': float(ks_stat),
             'p_value': float(p_value),
-            'match': p_value > 0.05  # True if distributions match
+            'match': bool(p_value > 0.05)  # True if distributions match
         },
         'mass_conservation': {
             'bias_mean': float(mass_bias_mean),
