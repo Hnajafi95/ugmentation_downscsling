@@ -72,15 +72,31 @@ def generate_samples(model, dataset, num_days=50, samples_per_day=5, device='cud
     heavy_indices.sort()
     print(f"Found {len(heavy_indices)} heavy precipitation days")
 
+    # Convert day_ids to dataset indices
+    # The dataset contains a subset of days (e.g., test split), so we need to find
+    # which heavy days are actually in this dataset
+    day_id_to_idx = {day_id: idx for idx, day_id in enumerate(dataset.day_ids)}
+
+    valid_indices = []
+    for day_id in heavy_indices:
+        if day_id in day_id_to_idx:
+            valid_indices.append(day_id_to_idx[day_id])
+
+    print(f"Found {len(valid_indices)} heavy days in current dataset split")
+
+    if len(valid_indices) == 0:
+        raise ValueError("No heavy precipitation days found in the current dataset split. "
+                        "Try using train split instead of test split.")
+
     # Limit to num_days
-    heavy_indices = heavy_indices[:num_days]
+    valid_indices = valid_indices[:num_days]
 
     real_samples = []
     generated_samples = []
     X_lr_samples = []
 
     with torch.no_grad():
-        for idx in heavy_indices:
+        for idx in valid_indices:
             # Get real data
             sample = dataset[idx]
             X_lr = sample['X_lr'].unsqueeze(0).to(device)  # (1, C, H_lr, W_lr)
@@ -338,10 +354,10 @@ def main(args):
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
-    # Load dataset
+    # Load dataset - use train split since most heavy days are there
     dataset = CvaeDataset(
         data_root=config['data_root'],
-        split='test',  # Evaluate on test set
+        split='train',  # Use train set where heavy days are
         use_land_sea=config['statics']['use_land_sea'],
         use_dist_coast=config['statics']['use_dist_coast'],
         use_elevation=config['statics']['use_elevation'],
