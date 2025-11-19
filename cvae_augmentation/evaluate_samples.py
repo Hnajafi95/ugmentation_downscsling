@@ -18,6 +18,8 @@ import torch
 from pathlib import Path
 from scipy.stats import ks_2samp, pearsonr
 from sklearn.metrics.pairwise import cosine_similarity
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for HPC
 import matplotlib.pyplot as plt
 
 from model_cvae import CVAE
