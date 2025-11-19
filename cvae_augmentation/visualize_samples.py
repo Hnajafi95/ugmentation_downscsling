@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 import matplotlib.colors as mcolors
 
-from data_io import load_thresholds
+from data_io import load_thresholds, CvaeDataset
 
 
 def load_config(config_path):
@@ -59,17 +59,29 @@ def denormalize_to_mmday(y_normalized, mean_pr, std_pr):
 
 
 def load_real_data(config, day_ids):
-    """Load real precipitation data for given day IDs."""
-    data_dir = Path(config['data_root']) / "data" / "Y_hr"
+    """Load real precipitation data for given day IDs using CvaeDataset."""
+    # Create dataset to load data
+    dataset = CvaeDataset(
+        data_root=config['data_root'],
+        split='train',
+        use_land_sea=True,
+        use_dist_coast=True,
+        use_elevation=False
+    )
+
+    # Build mapping from day_id to dataset index
+    day_id_to_idx = {day_id: idx for idx, day_id in enumerate(dataset.day_ids)}
 
     real_data = []
     for day_id in day_ids:
-        file_path = data_dir / f"Y_hr_{day_id:05d}.npy"
-        if file_path.exists():
-            data = np.load(file_path)
+        if day_id in day_id_to_idx:
+            idx = day_id_to_idx[day_id]
+            sample = dataset[idx]
+            # Y_hr is (1, H, W), convert to numpy
+            data = sample['Y_hr'].numpy()
             real_data.append(data)
         else:
-            print(f"Warning: Real data not found for day {day_id}")
+            print(f"Warning: Real data not found for day {day_id} (not in train split)")
             real_data.append(None)
 
     return real_data
