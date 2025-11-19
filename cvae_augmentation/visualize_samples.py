@@ -81,9 +81,10 @@ def load_synth_data(synth_dir, day_ids):
 
     for day_id in day_ids:
         # Find all samples for this day
+        # Filename format: day_XXXXX_sample_YY.Y_hr_syn.npy
         day_samples = []
         for k in range(10):  # Check up to 10 samples per day
-            file_path = synth_dir / f"synth_{day_id:05d}_k{k}.npy"
+            file_path = synth_dir / f"day_{day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
             if file_path.exists():
                 data = np.load(file_path)
                 day_samples.append(data)
@@ -237,14 +238,15 @@ def main(args):
     thresholds = load_thresholds(thresholds_path)
 
     # Find available synthesized samples
-    synth_files = list(synth_dir.glob("synth_*.npy"))
+    # Filename format: day_XXXXX_sample_YY.Y_hr_syn.npy
+    synth_files = list(synth_dir.glob("day_*_sample_*.Y_hr_syn.npy"))
     if len(synth_files) == 0:
         raise FileNotFoundError(f"No synthesized samples found in {synth_dir}")
 
     # Extract unique day IDs
     day_ids = set()
     for f in synth_files:
-        # Parse filename: synth_00123_k0.npy
+        # Parse filename: day_000228_sample_00.Y_hr_syn.npy
         parts = f.stem.split('_')
         day_id = int(parts[1])
         day_ids.add(day_id)
