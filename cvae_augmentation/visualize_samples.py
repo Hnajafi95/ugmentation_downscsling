@@ -237,9 +237,12 @@ def main(args):
     mean_pr, std_pr = load_normalization_params(config)
 
     # Load land mask
-    land_mask_path = Path(config['data_root']) / "data" / "static" / "land_sea_mask.npy"
+    land_mask_path = Path(config['data_root']) / "data" / "statics" / "land_sea_mask.npy"
     if land_mask_path.exists():
         land_mask = np.load(land_mask_path)
+        # Squeeze to 2D if needed (original shape may be (1, H, W))
+        if land_mask.ndim == 3:
+            land_mask = land_mask.squeeze(0)
         print(f"Loaded land mask: {land_mask.shape}")
     else:
         land_mask = None
