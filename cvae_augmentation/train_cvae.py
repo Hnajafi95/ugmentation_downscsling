@@ -376,9 +376,18 @@ def main(args):
             print(f"  For accurate results, compute and save p99_mmday.npy to {norm_dir}")
 
         # Compute P95 in mm/day space for metrics alignment
-        p95_norm = thresholds.get('P95', 3.80)
-        p95_mmday = float(np.expm1(p95_norm * std_pr.mean() + mean_pr.mean()))
-        print(f"  Estimated P95 (mm/day) ≈ {p95_mmday:.2f} (for metrics alignment)")
+        # Try to load from file first, otherwise use value from data analysis
+        p95_mmday_path = norm_dir / "p95_mmday.npy"
+        if p95_mmday_path.exists():
+            p95_mmday = float(np.load(p95_mmday_path))
+            print(f"  ✓ Loaded P95 (mm/day) = {p95_mmday:.2f}")
+        else:
+            # Use approximate value based on typical Florida precipitation data analysis
+            # This should match the P95 from analyze_parameters.py (~20 mm/day)
+            # The approximation using mean of std/mean is inaccurate due to per-pixel normalization
+            p95_mmday = 20.0  # Default based on typical Florida precipitation P95
+            print(f"  Using default P95 (mm/day) = {p95_mmday:.2f}")
+            print(f"  For accurate results, run analyze_parameters.py and save p95_mmday.npy to {norm_dir}")
 
     # Create loss criterion
     loss_type = config['loss'].get('type', 'simplified')
