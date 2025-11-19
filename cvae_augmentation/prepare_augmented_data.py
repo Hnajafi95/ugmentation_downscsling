@@ -51,6 +51,7 @@ def load_original_srdrn_data(srdrn_data_dir):
         "ERA5_std_train.npy",
         "land_mask.npy",
         "train_time_coords.npy",
+        "high_res_train_time_coords.npy",
         "train_indices.npy",
         "train_dates.npy",
         "low_res_lat.npy",
@@ -223,12 +224,24 @@ def create_augmented_dataset(original_predictors, original_obs,
     else:
         augmented_dates = synth_dates
 
-    return augmented_pred, augmented_obs, augmented_indices, augmented_dates
+    # Create augmented time coordinates
+    # For synthetic samples, use the timestamp from the source day
+    original_time_coords = metadata.get('train_time_coords.npy', None)
+    if original_time_coords is not None:
+        # Map day_id to timestamp from original training data
+        # Note: day_ids from cVAE are indices into the train split (0-9927)
+        synth_time_coords = np.array([original_time_coords[day_id] for day_id in day_ids])
+        augmented_time_coords = np.concatenate([original_time_coords, synth_time_coords])
+    else:
+        augmented_time_coords = None
+
+    return (augmented_pred, augmented_obs, augmented_indices, augmented_dates,
+            augmented_time_coords)
 
 
 def save_augmented_dataset(output_dir, augmented_pred, augmented_obs,
-                          augmented_indices, augmented_dates, metadata,
-                          original_n, synth_n):
+                          augmented_indices, augmented_dates, augmented_time_coords,
+                          metadata, original_n, synth_n):
     """
     Save augmented dataset in SRDRN format.
     """
@@ -241,7 +254,12 @@ def save_augmented_dataset(output_dir, augmented_pred, augmented_obs,
     np.save(output_dir / "train_indices.npy", augmented_indices)
     np.save(output_dir / "train_dates.npy", augmented_dates)
 
-    # Copy over other metadata files unchanged
+    # Save augmented time coordinates
+    if augmented_time_coords is not None:
+        np.save(output_dir / "train_time_coords.npy", augmented_time_coords)
+        np.save(output_dir / "high_res_train_time_coords.npy", augmented_time_coords)
+
+    # Copy over other metadata files unchanged (excluding train time coords which are augmented above)
     copy_files = [
         "ERA5_mean_train.npy",
         "ERA5_std_train.npy",
@@ -257,6 +275,7 @@ def save_augmented_dataset(output_dir, augmented_pred, augmented_obs,
         "test_indices.npy",
         "test_dates.npy",
         "test_time_coords.npy",
+        "high_res_test_time_coords.npy",
     ]
 
     for fname in copy_files:
@@ -303,6 +322,7 @@ def main(args):
         "test_indices.npy",
         "test_dates.npy",
         "test_time_coords.npy",
+        "high_res_test_time_coords.npy",
     ]
     for fname in test_files:
         fpath = srdrn_dir / fname
@@ -342,7 +362,8 @@ def main(args):
     synth_obs, synth_pred = convert_to_srdrn_format(synth_Y_hr, synth_X_lr)
 
     # Create augmented dataset
-    augmented_pred, augmented_obs, augmented_indices, augmented_dates = create_augmented_dataset(
+    (augmented_pred, augmented_obs, augmented_indices, augmented_dates,
+     augmented_time_coords) = create_augmented_dataset(
         original_pred, original_obs,
         synth_pred, synth_obs,
         metadata, day_ids, sample_ids
@@ -353,7 +374,7 @@ def main(args):
     save_augmented_dataset(
         args.output_dir,
         augmented_pred, augmented_obs,
-        augmented_indices, augmented_dates,
+        augmented_indices, augmented_dates, augmented_time_coords,
         metadata,
         len(original_obs), len(synth_obs)
     )
