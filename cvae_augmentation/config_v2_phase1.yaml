@@ -1,0 +1,105 @@
+# Phase 1 Configuration - Quick Wins
+# Changes from baseline:
+# 1. Increased latent dimension: d_z 64 → 128
+# 2. Reduced KL weight: beta_kl 0.01 → 0.005
+# 3. Added sparsity loss: lambda_sparse = 0.01
+# 4. Increased training: 150 → 250 epochs
+# 5. Increased heavy sampling: 0.2 → 0.4
+# 6. Better early stopping with plateau scheduler
+
+# Data paths
+data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_phase1"
+
+# Static maps configuration
+statics:
+  use_land_sea: true
+  use_dist_coast: true
+  use_elevation: false
+  normalize_statics: true
+
+# Model architecture - IMPROVED
+model:
+  d_x: 64
+  in_channels_X: 6
+  d_y: 256
+  in_channels_Y: 1
+  static_channels: 2
+  d_z: 128              # *** DOUBLED from 64 (better diversity) ***
+  H: 156
+  W: 132
+  base_filters: 64
+
+# Loss function - ENHANCED
+loss:
+  type: "enhanced"      # *** NEW enhanced loss with sparsity ***
+
+  # Intensity weighting
+  scale: 20.0           # Based on P95 (20 mm/day)
+  w_min: 0.1
+  w_max: 3.0
+
+  # Extreme tail boost
+  tail_boost: 2.5       # *** INCREASED from 2.0 (stronger extreme emphasis) ***
+
+  # Loss weights
+  lambda_mass: 0.005    # Mass conservation
+  lambda_sparse: 0.01   # *** NEW: Sparsity penalty (wet fraction) ***
+  lambda_spatial: 0.02  # *** NEW: Spatial gradient matching ***
+  target_wet_fraction: 0.75  # From data analysis
+
+  # KL divergence with free bits
+  beta_kl: 0.005        # *** REDUCED from 0.01 (less aggressive) ***
+  warmup_epochs: 20     # *** INCREASED from 15 (slower warmup) ***
+  free_bits: 0.5        # *** NEW: Minimum KL per dimension ***
+
+  p99_threshold: "from_thresholds_json"
+
+# Training configuration - OPTIMIZED
+train:
+  epochs: 250           # *** INCREASED from 150 (more training time) ***
+  batch_size: 64
+  num_workers: 2
+  lr: 0.0003
+  weight_decay: 0.0005
+  grad_clip: 1.0
+  amp: true
+  save_every: 20        # Save less frequently (disk space)
+
+  # Early stopping - MORE PATIENT
+  early_stopping_patience: 60    # *** INCREASED from 40 ***
+  early_stopping_metric: "MAE_tail"
+  early_stopping_min_delta: 0.01  # *** INCREASED from 0.001 (require meaningful improvement) ***
+
+  # LR warmup
+  lr_warmup_epochs: 10   # *** INCREASED from 5 (more gradual warmup) ***
+
+  # Stratified sampling - MORE HEAVY DAYS
+  use_stratified_sampling: true
+  min_heavy_fraction: 0.4  # *** INCREASED from 0.2 (40% heavy days per batch) ***
+
+# Learning rate scheduler - SWITCHED TO PLATEAU
+scheduler:
+  type: "plateau"       # *** CHANGED from cosine (better for long training) ***
+  mode: "min"
+  factor: 0.5           # Reduce LR by half
+  patience: 20          # Wait 20 epochs before reducing
+  min_lr: 1.0e-6
+  threshold: 0.01
+
+# Validation
+validation:
+  val_every: 1
+  log_every: 50
+
+# Sampling
+sampling:
+  mode: "posterior"
+  K: 5                  # *** INCREASED from 2 (more diversity in samples) ***
+  days: "heavy_only"
+  min_threshold: 0.1
+  temperature: 1.0
+
+# Device
+device: "cuda"
+seed: 42
