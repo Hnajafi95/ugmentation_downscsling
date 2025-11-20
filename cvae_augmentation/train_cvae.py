@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from model_cvae import CVAE
 from losses import SimplifiedCVAELoss, MinimalCVAELoss
+from losses_enhanced import EnhancedCVAELoss
 from utils_metrics import MetricsTracker
 from data_io import get_dataloaders, load_thresholds
 
@@ -93,6 +94,9 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
     total_rec = 0.0
     total_mass = 0.0
     total_kl = 0.0
+    total_sparse = 0.0
+    total_spatial = 0.0
+    total_wet_fraction = 0.0
     n_batches = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]")
@@ -132,8 +136,11 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
         # Accumulate losses
         total_loss += loss.item()
         total_rec += loss_dict['L_rec'].item()
-        total_mass += loss_dict['L_mass'].item()
+        total_mass += loss_dict.get('L_mass', 0.0) if isinstance(loss_dict.get('L_mass'), float) else loss_dict.get('L_mass', torch.tensor(0.0)).item()
         total_kl += loss_dict['L_kl'].item()
+        total_sparse += loss_dict.get('L_sparse', torch.tensor(0.0)).item()
+        total_spatial += loss_dict.get('L_spatial', torch.tensor(0.0)).item()
+        total_wet_fraction += loss_dict.get('wet_fraction', 0.0)
         n_batches += 1
 
         # Update progress bar
@@ -149,12 +156,18 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
     avg_rec = total_rec / n_batches
     avg_mass = total_mass / n_batches
     avg_kl = total_kl / n_batches
+    avg_sparse = total_sparse / n_batches
+    avg_spatial = total_spatial / n_batches
+    avg_wet_fraction = total_wet_fraction / n_batches
 
     metrics = {
         'loss': avg_loss,
         'L_rec': avg_rec,
         'L_mass': avg_mass,
         'L_kl': avg_kl,
+        'L_sparse': avg_sparse,
+        'L_spatial': avg_spatial,
+        'wet_fraction': avg_wet_fraction,
         'beta': criterion.current_beta
     }
 
@@ -170,6 +183,9 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
     total_rec = 0.0
     total_mass = 0.0
     total_kl = 0.0
+    total_sparse = 0.0
+    total_spatial = 0.0
+    total_wet_fraction = 0.0
     n_batches = 0
 
     # Initialize metrics tracker (with mm/day support if params provided)
@@ -197,8 +213,11 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
             # Accumulate losses
             total_loss += loss_dict['loss'].item()
             total_rec += loss_dict['L_rec'].item()
-            total_mass += loss_dict['L_mass'].item()
+            total_mass += loss_dict.get('L_mass', 0.0) if isinstance(loss_dict.get('L_mass'), float) else loss_dict.get('L_mass', torch.tensor(0.0)).item()
             total_kl += loss_dict['L_kl'].item()
+            total_sparse += loss_dict.get('L_sparse', torch.tensor(0.0)).item()
+            total_spatial += loss_dict.get('L_spatial', torch.tensor(0.0)).item()
+            total_wet_fraction += loss_dict.get('wet_fraction', 0.0)
             n_batches += 1
 
             # Update metrics tracker
@@ -209,6 +228,9 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
     avg_rec = total_rec / n_batches
     avg_mass = total_mass / n_batches
     avg_kl = total_kl / n_batches
+    avg_sparse = total_sparse / n_batches
+    avg_spatial = total_spatial / n_batches
+    avg_wet_fraction = total_wet_fraction / n_batches
 
     # Compute metrics
     metrics = metrics_tracker.compute()
@@ -217,6 +239,9 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
         'L_rec': avg_rec,
         'L_mass': avg_mass,
         'L_kl': avg_kl,
+        'L_sparse': avg_sparse,
+        'L_spatial': avg_spatial,
+        'wet_fraction': avg_wet_fraction,
         'beta': criterion.current_beta
     })
 
@@ -424,8 +449,32 @@ def main(args):
         )
         print(f"  Minimal loss (2 terms only) in mm/day space: weighted_rec + KL")
 
+    elif loss_type == 'enhanced':
+        # Enhanced loss: weighted_rec + mass + sparsity + spatial + KL (with free bits)
+        criterion = EnhancedCVAELoss(
+            p99_mmday=p99_mmday,
+            mean_pr=mean_pr,
+            std_pr=std_pr,
+            scale=config['loss'].get('scale', 20.0),
+            w_min=config['loss'].get('w_min', 0.1),
+            w_max=config['loss'].get('w_max', 3.0),
+            tail_boost=config['loss'].get('tail_boost', 2.5),
+            lambda_mass=config['loss'].get('lambda_mass', 0.005),
+            lambda_sparse=config['loss'].get('lambda_sparse', 0.01),
+            lambda_spatial=config['loss'].get('lambda_spatial', 0.02),
+            target_wet_fraction=config['loss'].get('target_wet_fraction', 0.75),
+            beta_kl=config['loss']['beta_kl'],
+            warmup_epochs=config['loss']['warmup_epochs'],
+            free_bits=config['loss'].get('free_bits', 0.5)
+        )
+        print(f"  Enhanced loss with sparsity and spatial structure preservation")
+        print(f"    - Intensity weighting: scale={config['loss'].get('scale', 20.0)}, tail_boost={config['loss'].get('tail_boost', 2.5)}")
+        print(f"    - Sparsity: λ={config['loss'].get('lambda_sparse', 0.01)}, target_wet_fraction={config['loss'].get('target_wet_fraction', 0.75)}")
+        print(f"    - Spatial gradient: λ={config['loss'].get('lambda_spatial', 0.02)}")
+        print(f"    - Free bits: {config['loss'].get('free_bits', 0.5)} nats/dim")
+
     else:
-        raise ValueError(f"Unknown loss type: {loss_type}. Use 'simplified' or 'minimal'.")
+        raise ValueError(f"Unknown loss type: {loss_type}. Use 'simplified', 'minimal', or 'enhanced'.")
 
     # Move criterion to device (important for SimplifiedCVAELoss with buffers!)
     criterion = criterion.to(device)
@@ -440,7 +489,9 @@ def main(args):
     # Initialize CSV log
     log_file = logs_dir / "train_log.csv"
     log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_kl',
+                  'train_L_sparse', 'train_L_spatial', 'train_wet_fraction',
                   'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_kl',
+                  'val_L_sparse', 'val_L_spatial', 'val_wet_fraction',
                   'val_MAE_all', 'val_MAE_tail', 'val_RMSE_all', 'val_mass_bias',
                   'val_MAE_all_zspace', 'val_MAE_tail_zspace',
                   'beta', 'lr', 'val_combined_metric']
@@ -505,12 +556,18 @@ def main(args):
                     'epoch': epoch + 1,
                     'train_loss': train_metrics['loss'],
                     'train_L_rec': train_metrics['L_rec'],
-                    'train_L_mass': train_metrics['L_mass'],
+                    'train_L_mass': train_metrics.get('L_mass', 0.0),
                     'train_L_kl': train_metrics['L_kl'],
+                    'train_L_sparse': train_metrics.get('L_sparse', 0.0),
+                    'train_L_spatial': train_metrics.get('L_spatial', 0.0),
+                    'train_wet_fraction': train_metrics.get('wet_fraction', 0.0),
                     'val_loss': val_metrics['loss'],
                     'val_L_rec': val_metrics['L_rec'],
-                    'val_L_mass': val_metrics['L_mass'],
+                    'val_L_mass': val_metrics.get('L_mass', 0.0),
                     'val_L_kl': val_metrics['L_kl'],
+                    'val_L_sparse': val_metrics.get('L_sparse', 0.0),
+                    'val_L_spatial': val_metrics.get('L_spatial', 0.0),
+                    'val_wet_fraction': val_metrics.get('wet_fraction', 0.0),
                     'val_MAE_all': val_metrics['MAE_all'],
                     'val_MAE_tail': val_metrics['MAE_tail'],
                     'val_RMSE_all': val_metrics['RMSE_all'],
