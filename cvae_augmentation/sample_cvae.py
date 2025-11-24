@@ -195,6 +195,11 @@ def main(args):
     min_threshold = config['sampling']['min_threshold']
     temperature = config['sampling'].get('temperature', 1.0)
 
+    # CRITICAL: Pixel-wise threshold to eliminate drizzle everywhere
+    # Any pixel with value < pixel_threshold will be set to exactly 0.0
+    pixel_threshold = config['sampling'].get('pixel_threshold', 0.1)  # mm/day
+    print(f"Pixel threshold: {pixel_threshold} mm/day (zeros out drizzle)")
+
     n_generated = 0
     n_discarded = 0
 
@@ -241,6 +246,10 @@ def main(args):
 
                 # Convert to numpy
                 Y_hat_np = Y_hat.cpu().numpy()[0]  # (1, H, W)
+
+                # CRITICAL FIX: Apply pixel-wise thresholding to eliminate drizzle
+                # This fixes the "100% wet fraction" problem by zeroing out background noise
+                Y_hat_np[Y_hat_np < pixel_threshold] = 0.0
 
                 # Check minimum threshold (only in posterior mode)
                 if mode == "posterior" and mass_ref is not None:

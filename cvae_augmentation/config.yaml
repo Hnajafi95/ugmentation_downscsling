@@ -96,6 +96,7 @@ sampling:
   days: "heavy_only"
   min_threshold: 0.1
   temperature: 1.0
+  pixel_threshold: 0.1  # CRITICAL: Zero out drizzle below this threshold (mm/day)
 
 # Device
 device: "cuda"
