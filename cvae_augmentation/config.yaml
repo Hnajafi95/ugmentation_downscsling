@@ -1,11 +1,15 @@
-# Improved Configuration - Option A: Architecture Fix + Moderate Improvements
+# Phase 1 Low-Risk Fixes - Critical Bug Fixes + Conditioning Dropout
 # Philosophy: ONE reconstruction loss (like SRDRN) + KL regularization
-# Key improvement: Transposed convolutions for sharp spatial details
-# Moderate improvements to capacity and training without adding loss objectives
+#
+# CRITICAL FIXES:
+#   1. w_min=1.0 (was 0.1): Stop ignoring dry region errors → fixes drizzle everywhere
+#   2. Conditioning dropout (p=0.5): Force decoder to use z → fixes posterior collapse
+#   3. beta_kl=0.0005 (was 0.005): Allow latent usage → fixes diversity
+#   4. Transposed convolutions: Learnable upsampling → better spatial structure
 
 # Data paths
 data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
-outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_improved"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_final"
 
 # Static maps configuration
 statics:
@@ -33,8 +37,8 @@ loss:
   # Intensity weighting - Moderately improved
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
   scale: 20.0         # Based on P95 percentile
-  w_min: 0.1          # Min weight for light rain
-  w_max: 2.0          # Keep moderate (not aggressive 5.0)
+  w_min: 1.0          # CRITICAL FIX: Equal weighting for dry/wet (was 0.1 causing drizzle everywhere)
+  w_max: 3.0          # Keep moderate (not aggressive 5.0)
 
   # Extra boost for extreme tail (P99+) - Moderately increased
   tail_boost: 3.0     # INCREASED from 2.0 (more extreme emphasis without being aggressive)
@@ -42,8 +46,8 @@ loss:
   # Mass conservation (keep small)
   lambda_mass: 0.005  # Light constraint
 
-  # KL divergence - REDUCED to prevent posterior collapse
-  beta_kl: 0.005      # REDUCED from 0.01 (less aggressive, more diversity)
+  # KL divergence - ULTRA-LOW to prevent posterior collapse
+  beta_kl: 0.0005     # CRITICAL: 10x reduction from 0.005 (allow model to use latent z)
   warmup_epochs: 20   # INCREASED from 15 (slower, gentler warmup)
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
