@@ -424,10 +424,10 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="Path to config file")
     parser.add_argument("--synth_dir", type=str,
-                        default="outputs/cvae_simplified/synth",
+                        default="outputs/cvae_improved/synth",
                         help="Directory containing synthesized samples")
     parser.add_argument("--output", type=str,
-                        default="outputs/cvae_simplified/visualizations",
+                        default="outputs/cvae_improved/visualizations",
                         help="Output directory for plots")
     parser.add_argument("--num_samples", type=int, default=20,
                         help="Number of samples to visualize (0 for all)")
