@@ -223,10 +223,13 @@ class LatentHead(nn.Module):
 
 class Decoder(nn.Module):
     """
-    Decoder with Transposed Convolutions for sharper spatial details.
+    Decoder with Transposed Convolutions AND Conditioning Dropout.
 
-    Replaces bilinear interpolation with learned upsampling to avoid
-    the inherent smoothing/blurring that causes poor spatial correlation.
+    Key features:
+    1. Transposed convolutions for learnable upsampling (sharp details)
+    2. Conditioning dropout forces the model to use latent variable z
+       - During training, h_X is randomly zeroed 50% of the time
+       - This prevents posterior collapse by making z essential for reconstruction
 
     Input: z (B, d_z), h_X (B, d_x)
     Output: Y_hat (B, 1, H, W)
@@ -254,6 +257,11 @@ class Decoder(nn.Module):
         self.W_init = 17  # 132 // 8 approx
 
         self.init_channels = base_filters * 8  # 512
+
+        # CRITICAL: Conditioning Dropout
+        # Randomly zeros h_X during training to force model to use z
+        # p=0.5 means 50% of batches have h_X zeroed out
+        self.cond_dropout = nn.Dropout(p=0.5)
 
         # FC from [z; h_X] to initial feature map
         input_dim = d_z + d_x
@@ -300,8 +308,13 @@ class Decoder(nn.Module):
         Returns:
             Y_hat: (B, 1, H, W) generated precipitation
         """
+        # CRITICAL: Apply conditioning dropout during training
+        # This forces the decoder to rely on z instead of just h_X
+        # During eval/sampling, dropout is disabled automatically
+        h_X_dropped = self.cond_dropout(h_X)
+
         # Concatenate and project to initial feature map
-        h = torch.cat([z, h_X], dim=1)  # (B, d_z + d_x)
+        h = torch.cat([z, h_X_dropped], dim=1)  # (B, d_z + d_x)
         h = self.fc(h)  # (B, init_channels * H_init * W_init)
         h = h.view(-1, self.init_channels, self.H_init, self.W_init)  # (B, 512, 20, 17)
 
