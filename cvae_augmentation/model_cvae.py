@@ -223,7 +223,10 @@ class LatentHead(nn.Module):
 
 class Decoder(nn.Module):
     """
-    Decoder that generates high-res precipitation conditioned on [z; h_X].
+    Decoder with Transposed Convolutions for sharper spatial details.
+
+    Replaces bilinear interpolation with learned upsampling to avoid
+    the inherent smoothing/blurring that causes poor spatial correlation.
 
     Input: z (B, d_z), h_X (B, d_x)
     Output: Y_hat (B, 1, H, W)
@@ -246,41 +249,44 @@ class Decoder(nn.Module):
         self.H = H
         self.W = W
 
-        # Calculate initial spatial dimensions using ceiling division
-        # This ensures we can upsample to exact target dimensions
-        # For H=156, W=132: H_init=20, W_init=17
-        self.H_init = (H + 7) // 8  # ceil(156/8) = 20
-        self.W_init = (W + 7) // 8  # ceil(132/8) = 17
+        # Starting small feature map dimensions
+        self.H_init = 20  # 156 // 8 approx
+        self.W_init = 17  # 132 // 8 approx
 
-        # Pre-compute intermediate sizes for exact upsampling
-        # (20, 17) → (39, 33) → (78, 66) → (156, 132)
-        self.H_step1 = (H + 3) // 4  # 39
-        self.W_step1 = (W + 3) // 4  # 33
-        self.H_step2 = (H + 1) // 2  # 78
-        self.W_step2 = (W + 1) // 2  # 66
-
-        # Initial feature maps
         self.init_channels = base_filters * 8  # 512
 
         # FC from [z; h_X] to initial feature map
         input_dim = d_z + d_x
-        self.fc1 = nn.Linear(input_dim, 512)
-        self.fc2 = nn.Linear(512, self.init_channels * self.H_init * self.W_init)
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.ReLU(True),
+            nn.Linear(512, self.init_channels * self.H_init * self.W_init),
+            nn.ReLU(True)
+        )
 
-        # Decoder blocks with upsampling (using exact sizes, not scale_factor)
-        # (B, 512, H_init, W_init) → (B, 256, H_step1, W_step1)
-        self.conv1 = nn.Conv2d(self.init_channels, base_filters * 4, kernel_size=3, padding=1)
+        # Transposed Convolutions (Learnable upsampling for sharp details)
+        # Block 1: (B, 512, 20, 17) → (B, 256, 40, 34) → crop/adjust to (39, 33)
+        self.up1 = nn.ConvTranspose2d(
+            self.init_channels, base_filters * 4,
+            kernel_size=4, stride=2, padding=1
+        )
         self.bn1 = nn.BatchNorm2d(base_filters * 4)
 
-        # (B, 256, H_step1, W_step1) → (B, 128, H_step2, W_step2)
-        self.conv2 = nn.Conv2d(base_filters * 4, base_filters * 2, kernel_size=3, padding=1)
+        # Block 2: (B, 256, 39, 33) → (B, 128, 78, 66)
+        self.up2 = nn.ConvTranspose2d(
+            base_filters * 4, base_filters * 2,
+            kernel_size=4, stride=2, padding=1
+        )
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
 
-        # (B, 128, H_step2, W_step2) → (B, 64, H, W)
-        self.conv3 = nn.Conv2d(base_filters * 2, base_filters, kernel_size=3, padding=1)
+        # Block 3: (B, 128, 78, 66) → (B, 64, 156, 132)
+        self.up3 = nn.ConvTranspose2d(
+            base_filters * 2, base_filters,
+            kernel_size=4, stride=2, padding=1
+        )
         self.bn3 = nn.BatchNorm2d(base_filters)
 
-        # Final conv to output
+        # Final output layer
         self.conv_out = nn.Conv2d(base_filters, 1, kernel_size=3, padding=1)
 
         self.relu = nn.ReLU(inplace=True)
@@ -294,31 +300,25 @@ class Decoder(nn.Module):
         Returns:
             Y_hat: (B, 1, H, W) generated precipitation
         """
-        # Concatenate z and h_X
+        # Concatenate and project to initial feature map
         h = torch.cat([z, h_X], dim=1)  # (B, d_z + d_x)
-
-        # FC layers
-        h = self.relu(self.fc1(h))      # (B, 512)
-        h = self.relu(self.fc2(h))      # (B, init_channels * H_init * W_init)
-
-        # Reshape to initial feature map
+        h = self.fc(h)  # (B, init_channels * H_init * W_init)
         h = h.view(-1, self.init_channels, self.H_init, self.W_init)  # (B, 512, 20, 17)
 
-        # Upsample blocks with exact target sizes (no rounding errors)
-        # Step 1: (20, 17) → (39, 33)
-        h = F.interpolate(h, size=(self.H_step1, self.W_step1), mode='bilinear', align_corners=False)
-        h = self.relu(self.bn1(self.conv1(h)))  # (B, 256, 39, 33)
+        # Upsample Block 1: (20, 17) → (40, 34) → adjust to (39, 33)
+        h = self.relu(self.bn1(self.up1(h)))
+        # Handle size mismatch from transposed conv (crop to exact size)
+        if h.shape[2] != 39 or h.shape[3] != 33:
+            h = F.interpolate(h, size=(39, 33), mode='bilinear', align_corners=False)
 
-        # Step 2: (39, 33) → (78, 66)
-        h = F.interpolate(h, size=(self.H_step2, self.W_step2), mode='bilinear', align_corners=False)
-        h = self.relu(self.bn2(self.conv2(h)))  # (B, 128, 78, 66)
+        # Upsample Block 2: (39, 33) → (78, 66)
+        h = self.relu(self.bn2(self.up2(h)))
 
-        # Step 3: (78, 66) → (156, 132)
-        h = F.interpolate(h, size=(self.H, self.W), mode='bilinear', align_corners=False)
-        h = self.relu(self.bn3(self.conv3(h)))  # (B, 64, 156, 132)
+        # Upsample Block 3: (78, 66) → (156, 132)
+        h = self.relu(self.bn3(self.up3(h)))
 
-        # Output layer
-        Y_hat = self.conv_out(h)        # (B, 1, 156, 132)
+        # Final output
+        Y_hat = self.conv_out(h)  # (B, 1, 156, 132)
 
         # Apply ReLU to ensure non-negative precipitation
         Y_hat = F.relu(Y_hat)
