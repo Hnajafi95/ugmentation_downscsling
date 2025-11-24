@@ -18,6 +18,42 @@ from model_cvae import CVAE
 from data_io import load_split, load_categories, load_statics, load_day_X_lr, load_day_Y_hr
 
 
+def denormalize_to_mmday(y_normalized, mean_pr, std_pr):
+    """
+    Convert normalized precipitation to mm/day.
+
+    Args:
+        y_normalized: (H, W) or (1, H, W) normalized log-transformed precipitation
+        mean_pr: (H, W) mean of log1p(precipitation)
+        std_pr: (H, W) std of log1p(precipitation)
+
+    Returns:
+        y_mmday: (H, W) or (1, H, W) precipitation in mm/day
+    """
+    # Handle 3D case (1, H, W)
+    if y_normalized.ndim == 3 and y_normalized.shape[0] == 1:
+        y_normalized_2d = y_normalized[0]  # (H, W)
+        was_3d = True
+    else:
+        y_normalized_2d = y_normalized
+        was_3d = False
+
+    # Reverse z-score normalization
+    log1p_precip = y_normalized_2d * std_pr + mean_pr  # (H, W)
+
+    # Reverse log1p transform
+    y_mmday = np.expm1(log1p_precip)  # exp(x) - 1
+
+    # Clip negatives
+    y_mmday = np.maximum(y_mmday, 0.0)
+
+    # Restore 3D shape if needed
+    if was_3d:
+        y_mmday = y_mmday[np.newaxis, :, :]  # (1, H, W)
+
+    return y_mmday
+
+
 def load_config(config_path):
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
@@ -178,6 +214,19 @@ def main(args):
     # Get land mask for mass threshold check
     land_mask = statics_dict['land_sea_mask'][0]  # (H, W)
 
+    # CRITICAL: Load normalization parameters for denormalization
+    print("\nLoading normalization parameters...")
+    norm_dir = data_root / "metadata"
+    mean_path = norm_dir / "ERA5_mean_train.npy"
+    std_path = norm_dir / "ERA5_std_train.npy"
+
+    if mean_path.exists() and std_path.exists():
+        mean_pr = np.load(mean_path)  # (H, W)
+        std_pr = np.load(std_path)    # (H, W)
+        print(f"✓ Loaded normalization parameters from {norm_dir}")
+    else:
+        raise FileNotFoundError(f"Normalization files not found in {norm_dir}")
+
     # Get day list
     day_ids = get_day_list(args, config)
 
@@ -214,14 +263,15 @@ def main(args):
 
             # If posterior mode, also load Y_hr to compute mu, logvar
             if mode == "posterior":
-                Y_hr_np = load_day_Y_hr(data_root.parent / "data", day_id)  # (1, H, W)
-                Y_hr = torch.from_numpy(Y_hr_np).float().unsqueeze(0).to(device)  # (1, 1, H, W)
+                Y_hr_normalized = load_day_Y_hr(data_root.parent / "data", day_id)  # (1, H, W) normalized
+                Y_hr = torch.from_numpy(Y_hr_normalized).float().unsqueeze(0).to(device)  # (1, 1, H, W)
 
                 # Encode to get posterior
                 mu, logvar, h_X = model.encode(X_lr, Y_hr, S_batch)
 
-                # Compute reference mass for threshold check
-                mass_ref = float((Y_hr_np[0] * land_mask).sum())
+                # Compute reference mass for threshold check (in mm/day space)
+                Y_hr_mmday = denormalize_to_mmday(Y_hr_normalized, mean_pr, std_pr)  # (1, H, W)
+                mass_ref = float((Y_hr_mmday[0] * land_mask).sum())
             else:
                 # Prior mode: sample z ~ N(0, I)
                 mu = None
@@ -244,23 +294,34 @@ def main(args):
                 # Decode
                 Y_hat = model.decode(z, h_X)  # (1, 1, H, W)
 
-                # Convert to numpy
-                Y_hat_np = Y_hat.cpu().numpy()[0]  # (1, H, W)
+                # Convert to numpy (still in normalized space)
+                Y_hat_normalized = Y_hat.cpu().numpy()[0]  # (1, H, W)
 
-                # CRITICAL FIX: Apply pixel-wise thresholding to eliminate drizzle
-                # This fixes the "100% wet fraction" problem by zeroing out background noise
-                Y_hat_np[Y_hat_np < pixel_threshold] = 0.0
+                # CRITICAL FIX: Denormalize BEFORE applying pixel threshold
+                # The model outputs in log1p + z-scored space, we need mm/day for thresholding
+                Y_hat_mmday = denormalize_to_mmday(Y_hat_normalized, mean_pr, std_pr)  # (1, H, W)
+
+                # Apply pixel-wise thresholding in mm/day space
+                # This fixes the "100% wet fraction" problem by zeroing out drizzle
+                Y_hat_mmday[Y_hat_mmday < pixel_threshold] = 0.0
 
                 # Check minimum threshold (only in posterior mode)
+                # Use mm/day values for mass check
                 if mode == "posterior" and mass_ref is not None:
-                    mass_gen = float((Y_hat_np[0] * land_mask).sum())
+                    mass_gen = float((Y_hat_mmday[0] * land_mask).sum())
                     if mass_gen < min_threshold * mass_ref:
                         n_discarded += 1
                         continue  # Discard this sample
 
-                # Save synthetic Y_hr
+                # Re-normalize before saving (to match training data format)
+                # Convert back to normalized log-space for consistency with training data
+                Y_hat_mmday_safe = np.maximum(Y_hat_mmday, 0.0)  # Ensure non-negative
+                log1p_precip = np.log1p(Y_hat_mmday_safe)  # log(1 + x)
+                Y_hat_renormalized = (log1p_precip - mean_pr) / (std_pr + 1e-8)  # Avoid div by zero
+
+                # Save synthetic Y_hr in normalized format (to match real data)
                 Y_hr_syn_path = synth_dir / f"day_{day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
-                np.save(Y_hr_syn_path, Y_hat_np.astype(np.float32))
+                np.save(Y_hr_syn_path, Y_hat_renormalized.astype(np.float32))
 
                 # Save reference X_lr (copy-through)
                 X_lr_ref_path = synth_dir / f"day_{day_id:06d}_sample_{k:02d}.X_lr_ref.npy"
