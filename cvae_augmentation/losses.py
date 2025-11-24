@@ -194,18 +194,55 @@ def kl_divergence(mu, logvar):
     return kl_loss
 
 
+def gradient_loss(y_true, y_hat):
+    """
+    Gradient (edge) loss - forces sharp transitions between wet and dry regions.
+
+    Computes L1 difference between spatial gradients (horizontal and vertical edges).
+    This penalizes smooth/blurry predictions and encourages sharp boundaries.
+
+    CRITICAL for fixing "drizzle everywhere" - forces model to create
+    sharp transitions: "this pixel is wet, neighbor is dry".
+
+    Args:
+        y_true: (B, 1, H, W) ground truth
+        y_hat: (B, 1, H, W) predictions
+
+    Returns:
+        loss: Scalar gradient loss
+    """
+    # Horizontal gradients (left-right edges)
+    # dy[..., :, i] = abs(y[..., :, i+1] - y[..., :, i])
+    dy_true = torch.abs(y_true[:, :, :, 1:] - y_true[:, :, :, :-1])
+    dy_hat = torch.abs(y_hat[:, :, :, 1:] - y_hat[:, :, :, :-1])
+
+    # Vertical gradients (top-bottom edges)
+    # dx[..., i, :] = abs(y[..., i+1, :] - y[..., i, :])
+    dx_true = torch.abs(y_true[:, :, 1:, :] - y_true[:, :, :-1, :])
+    dx_hat = torch.abs(y_hat[:, :, 1:, :] - y_hat[:, :, :-1, :])
+
+    # L1 loss on gradient differences
+    loss_horizontal = torch.mean(torch.abs(dy_true - dy_hat))
+    loss_vertical = torch.mean(torch.abs(dx_true - dx_hat))
+
+    return loss_horizontal + loss_vertical
+
+
 class SimplifiedCVAELoss(nn.Module):
     """
-    Simplified cVAE loss with ONE unified reconstruction objective.
+    Simplified cVAE loss with edge preservation for sharp predictions.
 
-    L_total = L_weighted_rec + λ_mass * L_mass + β * L_kl
+    L_total = L_weighted_rec + λ_mass * L_mass + λ_grad * L_grad + β * L_kl
 
-    Where L_weighted_rec is a SINGLE intensity-weighted MAE that
-    automatically emphasizes heavy precipitation (like SRDRN).
+    Components:
+    - L_weighted_rec: Intensity-weighted MAE (emphasizes heavy precipitation)
+    - L_mass: Mass conservation (physical consistency)
+    - L_grad: Gradient loss (CRITICAL - forces sharp edges, prevents drizzle everywhere)
+    - L_kl: KL divergence (VAE regularization)
 
-    UPDATED: Now works in mm/day space for correct weighting!
+    UPDATED: Added gradient loss to fix "smooth background" problem!
 
-    This avoids the multi-objective optimization problem!
+    This creates sharp transitions between wet/dry regions.
     """
 
     def __init__(self,
@@ -217,6 +254,7 @@ class SimplifiedCVAELoss(nn.Module):
                  w_max: float = 2.0,
                  tail_boost: float = 1.5,
                  lambda_mass: float = 0.01,
+                 lambda_grad: float = 1.0,
                  beta_kl: float = 0.01,
                  warmup_epochs: int = 15):
         """
@@ -229,6 +267,7 @@ class SimplifiedCVAELoss(nn.Module):
             w_min, w_max: Weight bounds
             tail_boost: Extra multiplier for P99+ (default 1.5)
             lambda_mass: Weight for mass conservation (keep small)
+            lambda_grad: Weight for gradient (edge) loss (CRITICAL for sharp edges)
             beta_kl: Final KL weight (required for VAE)
             warmup_epochs: KL warmup epochs
         """
@@ -240,6 +279,7 @@ class SimplifiedCVAELoss(nn.Module):
         self.w_max = w_max
         self.tail_boost = tail_boost
         self.lambda_mass = lambda_mass
+        self.lambda_grad = lambda_grad
         self.beta_kl = beta_kl
         self.warmup_epochs = warmup_epochs
 
@@ -266,7 +306,7 @@ class SimplifiedCVAELoss(nn.Module):
 
     def forward(self, y_true, y_hat, mu, logvar, land_mask):
         """
-        Compute simplified loss in mm/day space.
+        Compute loss with edge preservation.
 
         Args:
             y_true: (B, 1, H, W) normalized precipitation
@@ -278,26 +318,34 @@ class SimplifiedCVAELoss(nn.Module):
         Returns:
             loss_dict: All loss components
         """
-        # 1. Weighted reconstruction loss in mm/day space (ONE unified objective!)
+        # 1. Weighted reconstruction loss in mm/day space
         rec_loss, rec_info = intensity_weighted_mae_with_tail_boost_mmday(
             y_true, y_hat, self.mean_pr, self.std_pr, self.p99_mmday,
             self.scale, self.w_min, self.w_max, self.tail_boost
         )
 
-        # 2. Mass conservation (optional, but good for physical consistency)
+        # 2. Mass conservation (physical consistency)
         m_loss = mass_loss(y_true, y_hat, land_mask)
 
-        # 3. KL divergence (required for VAE)
+        # 3. Gradient (edge) loss - CRITICAL for sharp predictions!
+        # Forces model to create sharp wet/dry transitions, not smooth drizzle
+        grad_loss = gradient_loss(y_true, y_hat)
+
+        # 4. KL divergence (VAE regularization)
         kl_loss = kl_divergence(mu, logvar)
 
-        # Total loss (ONLY 3 TERMS instead of 4+!)
-        total_loss = rec_loss + self.lambda_mass * m_loss + self.current_beta * kl_loss
+        # Total loss with edge preservation
+        total_loss = (rec_loss +
+                     self.lambda_mass * m_loss +
+                     self.lambda_grad * grad_loss +
+                     self.current_beta * kl_loss)
 
         # For logging
         loss_dict = {
             'loss': total_loss,
             'L_rec': rec_loss,
             'L_mass': m_loss,
+            'L_grad': grad_loss,
             'L_kl': kl_loss,
             'beta': self.current_beta,
             'weights_mean': rec_info['weights_mean'],

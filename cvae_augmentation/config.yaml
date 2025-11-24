@@ -30,26 +30,28 @@ model:
   W: 132
   base_filters: 64      # Decoder now uses transposed convs for sharper details
 
-# Loss function - RELAXED to prevent mean collapse
+# Loss function - Edge preservation to fix smooth backgrounds
 loss:
-  type: "simplified"  # Use SimplifiedCVAELoss
+  type: "simplified"  # Use SimplifiedCVAELoss with gradient loss
 
-  # Intensity weighting - RELAXED to restore spatial structure
+  # Intensity weighting - Balanced to prevent background noise
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
   scale: 20.0         # Based on P95 percentile
-  w_min: 0.2          # REDUCED from 1.0 (stop panicking about dry spots)
+  w_min: 0.5          # INCREASED from 0.2 (penalize background noise more)
   w_max: 4.0          # Keep emphasis on heavy rain
 
-  # Extra boost for extreme tail (P99+) - REDUCED to stop hedging behavior
-  tail_boost: 1.5     # REDUCED from 3.0 (was too aggressive, caused mean collapse)
+  # Extra boost for extreme tail (P99+) - Moderate
+  tail_boost: 1.5     # Balanced value
 
   # Mass conservation (keep small)
   lambda_mass: 0.01   # Light constraint
-  lambda_grad: 1.0    # Edge sharpness loss
+
+  # CRITICAL: Gradient (edge) loss - Forces sharp transitions
+  lambda_grad: 2.0    # INCREASED from 1.0 (strong edge preservation)
 
   # KL divergence - ULTRA-LOW to prevent posterior collapse
-  beta_kl: 0.0005     # CRITICAL: Allow model to use latent z
-  warmup_epochs: 20   # INCREASED from 15 (slower, gentler warmup)
+  beta_kl: 0.0005     # Allow model to use latent z
+  warmup_epochs: 20   # Gradual warmup
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
@@ -97,8 +99,9 @@ sampling:
   days: "heavy_only"
   min_threshold: 0.1
   temperature: 1.0
-  pixel_threshold: 0.5  # CRITICAL: Zero out drizzle below this threshold (mm/day)
-                        # INCREASED from 0.1 to more aggressively remove background noise
+  pixel_threshold: 2.0  # CRITICAL: Zero out noise below this threshold (mm/day)
+                        # INCREASED from 0.5 → 2.0 to aggressively remove background drizzle
+                        # Meteorological standard: < 1-2 mm/day often considered "trace"
 
 # Device
 device: "cuda"
