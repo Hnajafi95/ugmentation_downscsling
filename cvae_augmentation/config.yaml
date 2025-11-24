@@ -1,10 +1,11 @@
-# Simplified Configuration - Single Unified Loss Objective
+# Improved Configuration - Option A: Architecture Fix + Moderate Improvements
 # Philosophy: ONE reconstruction loss (like SRDRN) + KL regularization
-# Avoids multi-objective trade-offs!
+# Key improvement: Transposed convolutions for sharp spatial details
+# Moderate improvements to capacity and training without adding loss objectives
 
 # Data paths
 data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
-outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_simplified"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_improved"
 
 # Static maps configuration
 statics:
@@ -13,70 +14,71 @@ statics:
   use_elevation: false
   normalize_statics: true
 
-# Model architecture - Reduced size
+# Model architecture - Improved capacity
 model:
   d_x: 64
   in_channels_X: 6
   d_y: 256
   in_channels_Y: 1
   static_channels: 2
-  d_z: 64
+  d_z: 128              # DOUBLED from 64 for better diversity & prevent collapse
   H: 156
   W: 132
-  base_filters: 64  # Reduced from 96 (less overfitting)
+  base_filters: 64      # Decoder now uses transposed convs for sharper details
 
-# Loss function - SIMPLIFIED!
+# Loss function - Keep it SIMPLE (single objective philosophy)
 loss:
-  type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
+  type: "simplified"  # Use SimplifiedCVAELoss - NO new loss components
 
-  # Intensity weighting - OPTIMIZED based on data analysis
+  # Intensity weighting - Moderately improved
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
-  # Using P95 as scale (not P90 which was too aggressive)
-  scale: 20.0         # Based on P95 percentile - moderate emphasis
+  scale: 20.0         # Based on P95 percentile
   w_min: 0.1          # Min weight for light rain
-  w_max: 3.0          # Allow stronger extreme emphasis
+  w_max: 2.0          # Keep moderate (not aggressive 5.0)
 
-  # Extra boost for extreme tail (P99+)
-  # With scale=20, P99 gets base weight=2.18, with tail_boost=2.0 → effective=4.36 (44x vs light)
-  tail_boost: 2.0     # Strong emphasis on P99+ extremes
+  # Extra boost for extreme tail (P99+) - Moderately increased
+  tail_boost: 3.0     # INCREASED from 2.0 (more extreme emphasis without being aggressive)
 
-  # Mass conservation (optional, small weight)
-  lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
+  # Mass conservation (keep small)
+  lambda_mass: 0.005  # Light constraint
 
-  # KL divergence (required for VAE)
-  beta_kl: 0.01       # Light regularization
-  warmup_epochs: 15   # KL warm-up
+  # KL divergence - REDUCED to prevent posterior collapse
+  beta_kl: 0.005      # REDUCED from 0.01 (less aggressive, more diversity)
+  warmup_epochs: 20   # INCREASED from 15 (slower, gentler warmup)
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
-# Training configuration
+# Training configuration - Better convergence
 train:
-  epochs: 150
+  epochs: 250           # INCREASED from 150 (more time to converge)
   batch_size: 64
   num_workers: 2
-  lr: 0.0003            # Increased from 0.0001 for faster convergence
-  weight_decay: 0.0005  # Regularization
+  lr: 0.0003
+  weight_decay: 0.0005
   grad_clip: 1.0
   amp: true
-  save_every: 10
+  save_every: 20        # Save less frequently
 
-  # Early stopping
-  early_stopping_patience: 40
-  early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
-  early_stopping_min_delta: 0.001    # Minimum improvement to count
+  # Early stopping - More patient
+  early_stopping_patience: 60       # INCREASED from 40 (give it more time)
+  early_stopping_metric: "MAE_tail"  # Optimize for extremes
+  early_stopping_min_delta: 0.01    # INCREASED from 0.001 (require meaningful improvement)
 
-  # LR warmup - gradually increase LR at start
-  lr_warmup_epochs: 5     # Warmup for first 5 epochs
+  # LR warmup - More gradual
+  lr_warmup_epochs: 10  # INCREASED from 5 (gentler warmup)
 
-  # Stratified sampling - ensures each batch has heavy precipitation days
-  use_stratified_sampling: true   # Enable stratified batching
-  min_heavy_fraction: 0.2         # 20% of each batch will be heavy days
+  # Stratified sampling - See more heavy events
+  use_stratified_sampling: true
+  min_heavy_fraction: 0.4  # INCREASED from 0.2 (40% heavy days per batch)
 
-# Learning rate scheduler
+# Learning rate scheduler - Better for long training
 scheduler:
-  type: "cosine"
-  T_max: 150
-  eta_min: 0.000001
+  type: "plateau"       # CHANGED from cosine (adaptive LR reduction)
+  mode: "min"
+  factor: 0.5           # Reduce LR by half when plateaued
+  patience: 20          # Wait 20 epochs before reducing
+  min_lr: 1.0e-6
+  threshold: 0.01
 
 # Validation
 validation:
@@ -86,7 +88,7 @@ validation:
 # Sampling
 sampling:
   mode: "posterior"
-  K: 5
+  K: 5              # Generate 5 samples per heavy day
   days: "heavy_only"
   min_threshold: 0.1
   temperature: 1.0
