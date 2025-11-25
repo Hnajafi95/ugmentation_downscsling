@@ -99,9 +99,9 @@ sampling:
   days: "heavy_only"
   min_threshold: 0.1
   temperature: 1.0
-  pixel_threshold: 2.0  # CRITICAL: Zero out noise below this threshold (mm/day)
-                        # INCREASED from 0.5 → 2.0 to aggressively remove background drizzle
-                        # Meteorological standard: < 1-2 mm/day often considered "trace"
+  pixel_threshold: 1.0  # CRITICAL: Zero out noise below this threshold (mm/day)
+                        # REDUCED from 2.0 → 1.0 to avoid zeroing out moderate days
+                        # 1.0 mm/day is standard meteorological "trace" threshold
 
 # Device
 device: "cuda"
