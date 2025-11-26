@@ -89,7 +89,7 @@ sampling:
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 1.0
+  temperature: 1.2  # Increased from 1.0 to generate more extreme values and improve GPD shape
   pixel_threshold: 1.0  # ADDED: Zero out pixels <1.0 mm/day to fix wet fraction
 
 # Device
