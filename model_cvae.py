@@ -320,9 +320,9 @@ class Decoder(nn.Module):
         # Output layer
         Y_hat = self.conv_out(h)        # (B, 1, 156, 132)
 
-        # Apply ReLU to ensure non-negative precipitation
-        Y_hat = F.relu(Y_hat)
-
+        # DON'T apply ReLU - data is Z-score normalized (can have negative values)
+        # Denormalization to mm/day happens later in sample_cvae.py
+        # Applying ReLU here prevents the model from predicting dry conditions
         return Y_hat
 
 
