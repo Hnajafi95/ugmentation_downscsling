@@ -244,10 +244,11 @@ def main(args):
     min_threshold = config['sampling']['min_threshold']
     temperature = config['sampling'].get('temperature', 1.0)
 
-    # CRITICAL: Pixel-wise threshold to eliminate drizzle everywhere
+    # OPTIONAL: Pixel-wise threshold to match physical detection limits
     # Any pixel with value < pixel_threshold will be set to exactly 0.0
+    # Default 0.1 mm/day matches typical rain gauge detection limits
     pixel_threshold = config['sampling'].get('pixel_threshold', 0.1)  # mm/day
-    print(f"Pixel threshold: {pixel_threshold} mm/day (zeros out drizzle)")
+    print(f"Pixel threshold: {pixel_threshold} mm/day (physical detection limit)")
 
     n_generated = 0
     n_discarded = 0
