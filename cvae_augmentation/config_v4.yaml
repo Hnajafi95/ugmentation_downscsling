@@ -1,0 +1,130 @@
+# V4 Configuration - Free Bits Solution for Posterior Collapse
+#
+# PHILOSOPHY: Use FREE BITS to prevent posterior variance from collapsing to zero
+#
+# ROOT CAUSE OF MODE COLLAPSE:
+#   Reconstruction loss (~8.0) >> KL loss (0.01 × 12 = 0.12)
+#   Model learns to minimize variance (logvar → -∞) to get perfect reconstruction
+#   Result: z = mu + eps*exp(logvar/2) ≈ mu (no randomness, all samples identical)
+#
+# FREE BITS SOLUTION:
+#   Enforces MINIMUM KL per dimension (0.5 nats)
+#   Forces model to maintain variance: can't collapse below threshold
+#   Result: Samples will be diverse even if reconstruction loss dominates
+#
+# KEY IMPROVEMENTS FROM V3:
+#   1. use_free_bits: true + free_bits: 0.5 - PREVENTS variance collapse
+#   2. beta_kl: 0.05 (5x V3) - Stronger KL weight for balance
+#   3. lambda_grad: 0.0 - Remove gradient loss (causes pixel-copying)
+#   4. Keep V1 proven weights (w_min, w_max, tail_boost, lambda_mass)
+#
+# EXPECTED RESULTS:
+#   - Diversity: >0.15 (samples actually vary!)
+#   - Spatial correlation: 0.5-0.6 (healthy, not copying)
+#   - Mass conservation: ±10-15%
+#   - KS test p-value: >0.05
+
+# Data paths
+data_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation"
+outputs_root: "/scratch/user/u.hn319322/ondemand/Downscaling/cVAE_augmentation/outputs/cvae_v4"
+
+# Static maps configuration
+statics:
+  use_land_sea: true
+  use_dist_coast: true
+  use_elevation: false
+  normalize_statics: true
+
+# Model architecture
+model:
+  d_x: 64
+  in_channels_X: 6
+  d_y: 256
+  in_channels_Y: 1
+  static_channels: 2
+  d_z: 128              # Keep 128 for better latent capacity
+  H: 156
+  W: 132
+  base_filters: 64
+
+# Loss function - V4 with FREE BITS
+loss:
+  type: "simplified"  # Use SimplifiedCVAELoss with free bits support
+
+  # Intensity weighting - Back to V1's successful values
+  scale: 20.0
+  w_min: 0.1          # Back to V1 (better dynamic range)
+  w_max: 3.0          # Back to V1 (less overfitting)
+  tail_boost: 2.0     # Back to V1 (stronger extreme emphasis)
+
+  # Mass conservation
+  lambda_mass: 0.005  # Back to V1 (more flexibility)
+
+  # Gradient loss - REMOVED
+  lambda_grad: 0.0    # No gradient loss (prevents pixel-copying)
+
+  # KL divergence - FREE BITS SOLUTION
+  beta_kl: 0.05       # 5x V3 (0.01 → 0.05) - Better balance with reconstruction
+                      # With KL~64 (128 dims × 0.5 free bits), contribution = 0.05 × 64 = 3.2
+                      # Now ratio is 8.0:3.2 = 2.5:1 (much more balanced!)
+
+  warmup_epochs: 20
+
+  # FREE BITS - THE KEY FIX
+  use_free_bits: true # Enable free bits constraint
+  free_bits: 0.5      # Minimum 0.5 nats per dimension
+                      # This FORCES the model to maintain variance
+                      # Cannot collapse variance below this threshold
+                      # With 128 dimensions: minimum KL = 128 × 0.5 = 64 nats
+
+  p99_threshold: "from_thresholds_json"
+
+# Training configuration
+train:
+  epochs: 200
+  batch_size: 64
+  num_workers: 2
+  lr: 0.0003
+  weight_decay: 0.0005
+  grad_clip: 1.0
+  amp: true
+  save_every: 20
+
+  # Early stopping
+  early_stopping_patience: 50
+  early_stopping_metric: "MAE_tail"
+  early_stopping_min_delta: 0.01
+
+  # LR warmup
+  lr_warmup_epochs: 5
+
+  # Stratified sampling
+  use_stratified_sampling: true
+  min_heavy_fraction: 0.4
+
+# Learning rate scheduler
+scheduler:
+  type: "plateau"
+  mode: "min"
+  factor: 0.5
+  patience: 20
+  min_lr: 1.0e-6
+  threshold: 0.01
+
+# Validation
+validation:
+  val_every: 1
+  log_every: 50
+
+# Sampling
+sampling:
+  mode: "posterior"
+  K: 5
+  days: "heavy_only"
+  min_threshold: 0.1
+  temperature: 1.0      # Standard temperature (free bits handles diversity)
+  pixel_threshold: 1.0  # Keep V2 fix (1.0 mm/day standard threshold)
+
+# Device
+device: "cuda"
+seed: 42

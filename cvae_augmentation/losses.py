@@ -194,6 +194,46 @@ def kl_divergence(mu, logvar):
     return kl_loss
 
 
+def kl_divergence_with_free_bits(mu, logvar, free_bits=0.5):
+    """
+    KL divergence with free bits constraint to prevent posterior collapse.
+
+    Free bits: Allow each latent dimension to have at least 'free_bits'
+    nats of information. This prevents the model from collapsing the
+    posterior variance to near-zero, which would kill sample diversity.
+
+    Args:
+        mu: (B, d_z) latent mean
+        logvar: (B, d_z) latent log variance
+        free_bits: Minimum KL per dimension (default 0.5 nats)
+
+    Returns:
+        kl_loss: Scalar KL loss
+        info: Dict with logging info
+    """
+    # KL per dimension: -0.5 * (1 + logvar - mu^2 - exp(logvar))
+    kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (B, d_z)
+
+    # Apply free bits constraint: max(kl_per_dim, free_bits)
+    kl_per_dim_constrained = torch.max(
+        kl_per_dim,
+        torch.tensor(free_bits, device=kl_per_dim.device, dtype=kl_per_dim.dtype)
+    )
+
+    # Sum over dimensions, mean over batch
+    kl_loss = kl_per_dim_constrained.sum(dim=1).mean()
+
+    # For logging
+    info = {
+        'kl_mean_per_dim': kl_per_dim.mean().item(),
+        'kl_max_per_dim': kl_per_dim.max().item(),
+        'kl_min_per_dim': kl_per_dim.min().item(),
+        'n_dims_at_free_bits': (kl_per_dim < free_bits).sum().item()
+    }
+
+    return kl_loss, info
+
+
 def gradient_loss(y_true, y_hat):
     """
     Gradient (edge) loss - forces sharp transitions between wet and dry regions.
@@ -256,7 +296,9 @@ class SimplifiedCVAELoss(nn.Module):
                  lambda_mass: float = 0.01,
                  lambda_grad: float = 1.0,
                  beta_kl: float = 0.01,
-                 warmup_epochs: int = 15):
+                 warmup_epochs: int = 15,
+                 use_free_bits: bool = False,
+                 free_bits: float = 0.5):
         """
         Args:
             p99_mmday: P99 threshold in mm/day space (not normalized!)
@@ -270,6 +312,8 @@ class SimplifiedCVAELoss(nn.Module):
             lambda_grad: Weight for gradient (edge) loss (CRITICAL for sharp edges)
             beta_kl: Final KL weight (required for VAE)
             warmup_epochs: KL warmup epochs
+            use_free_bits: Use free bits constraint (prevents posterior collapse)
+            free_bits: Minimum KL per dimension (default 0.5 nats)
         """
         super().__init__()
 
@@ -282,6 +326,8 @@ class SimplifiedCVAELoss(nn.Module):
         self.lambda_grad = lambda_grad
         self.beta_kl = beta_kl
         self.warmup_epochs = warmup_epochs
+        self.use_free_bits = use_free_bits
+        self.free_bits = free_bits
 
         # Store normalization parameters
         if isinstance(mean_pr, np.ndarray):
@@ -332,7 +378,13 @@ class SimplifiedCVAELoss(nn.Module):
         grad_loss = gradient_loss(y_true, y_hat)
 
         # 4. KL divergence (VAE regularization)
-        kl_loss = kl_divergence(mu, logvar)
+        if self.use_free_bits:
+            # Use free bits to prevent posterior collapse
+            kl_loss, kl_info = kl_divergence_with_free_bits(mu, logvar, self.free_bits)
+        else:
+            # Standard KL divergence
+            kl_loss = kl_divergence(mu, logvar)
+            kl_info = {}
 
         # Total loss with edge preservation
         total_loss = (rec_loss +
@@ -353,6 +405,13 @@ class SimplifiedCVAELoss(nn.Module):
             'mm_true_max': rec_info['mm_true_max'],
             'mm_true_mean': rec_info['mm_true_mean']
         }
+
+        # Add free bits info if available
+        if kl_info:
+            loss_dict.update({
+                'kl_mean_per_dim': kl_info['kl_mean_per_dim'],
+                'n_dims_at_free_bits': kl_info['n_dims_at_free_bits']
+            })
 
         return loss_dict
 
