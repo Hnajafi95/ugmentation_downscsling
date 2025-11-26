@@ -1,0 +1,25 @@
+{
+  "spatial_correlation": {
+    "mean": 0.2336230571512133,
+    "std": 0.22963575647015624,
+    "min": -0.46851229667663574,
+    "max": 0.6961085200309753
+  },
+  "extreme_distribution": {
+    "ks_statistic": 0.05552947723996049,
+    "p_value": 1.5531711154455485e-16,
+    "match": false
+  },
+  "mass_conservation": {
+    "bias_mean": -0.8430048227310181,
+    "bias_std": 3.5649025440216064,
+    "abs_bias_mean": 0.8430048227310181
+  },
+  "diversity": {
+    "mean": 0.03870544955134392,
+    "std": 0.03509676456451416
+  },
+  "reconstruction": {
+    "mae_extreme": 1.158805251121521
+  }
+}
