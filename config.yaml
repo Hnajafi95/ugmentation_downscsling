@@ -29,16 +29,16 @@ model:
 loss:
   type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
 
-  # Intensity weighting - TUNED to reduce over-emphasis on extremes
+  # Intensity weighting - BALANCED across all precipitation intensities
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
-  # Increased scale to reduce intensity weighting strength
-  scale: 25.0         # Increased from 20.0 - less aggressive weighting
+  # Increased scale significantly to reduce emphasis on extremes
+  scale: 35.0         # Increased from 25.0 - much less aggressive weighting
   w_min: 0.1          # Min weight for light rain
   w_max: 3.0          # Allow stronger extreme emphasis
 
   # Extra boost for extreme tail (P99+)
-  # Reduced from 2.0 to prevent over-focus on extremes that hurts spatial coherence
-  tail_boost: 1.5     # Moderate emphasis on P99+ extremes (reduced from 2.0)
+  # REMOVED tail_boost to force model to learn ALL spatial patterns equally
+  tail_boost: 1.0     # No extra boost (was 1.5) - learn light+heavy equally
 
   # Mass conservation (optional, small weight)
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
@@ -55,7 +55,7 @@ train:
   batch_size: 64
   num_workers: 2
   lr: 0.0003            # Increased from 0.0001 for faster convergence
-  weight_decay: 0.001   # Increased from 0.0005 to compensate for removed ReLU regularization
+  weight_decay: 0.0005  # Reduced from 0.001 to allow more spatial complexity
   grad_clip: 1.0
   amp: true
   save_every: 10
@@ -89,7 +89,7 @@ sampling:
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 1.2  # Increased from 1.0 to generate more extreme values and improve GPD shape
+  temperature: 1.5  # Increased from 1.2 to improve sample diversity
   # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
 
 # Device
