@@ -89,7 +89,7 @@ sampling:
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 2.0  # Increased from 1.5 - multiply std by 2.0 for more diverse samples
+  temperature: 1.0  
   # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
 
 # Device
