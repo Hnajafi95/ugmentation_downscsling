@@ -52,7 +52,7 @@ def compute_distance_to_coast(land_mask_2d, lat, lon):
     return dist_km.astype(np.float32)
 
 
-def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
+def categorize_days(Y_hr_array, land_mask_2d, p90, p95, p99):
     """
     Categorize days based on SPATIAL EXTENT of heavy rain.
 
@@ -64,16 +64,19 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
     not isolated spikes.
 
     Heavy Day Definition:
-    - ≥50 pixels exceed P95 intensity (captures organized storm systems)
+    - ≥50 pixels exceed P90 intensity (captures organized storm systems)
+      NOTE: We use P90 (not P95) because P95 of daily maxima is too strict for
+      individual pixels. Most organized rain in a storm won't hit the daily max.
     - OR max pixel exceeds P99 (captures extreme localized events)
 
-    This naturally provides 600-800 training days with actual spatial structure,
+    This provides 400-800 training days with actual spatial structure,
     vs 186 days with the old max-pixel approach.
 
     Args:
         Y_hr_array: (T, H, W) normalized log-scale precipitation
         land_mask_2d: (H, W) bool land mask
-        p95: P95 threshold for heavy rain intensity
+        p90: P90 threshold for pixel-level heavy rain (spatial extent)
+        p95: P95 threshold for moderate rain classification
         p99: P99 threshold for extreme localized events
 
     Returns:
@@ -93,16 +96,21 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
 
     interior_mask = land_mask_2d & ~coastal_mask
 
-    # Spatial extent threshold: How many pixels must exceed P95 to be "Heavy"
-    # 50 pixels ≈ 50 km² at 1km resolution ≈ 7km×7km storm (organized convection)
-    # This is ~0.4% of Florida land area (12,355 pixels)
-    MIN_HEAVY_PIXELS = 50
+    # Spatial extent threshold: How many pixels must exceed P90 to be "Heavy"
+    # CRITICAL: Data is 4km × 4km resolution (not 1km!)
+    # 25 pixels = 25 × 16 km²/pixel = 400 km² ≈ 20km × 20km organized system
+    # This captures mesoscale convection, sea breeze, fronts, tropical systems
+    # At 50 pixels (old), we only caught 28km × 28km+ systems (too restrictive)
+    MIN_HEAVY_PIXELS = 25  # Adjusted for 4km resolution
 
     for t in range(T):
         day_data = Y_hr_array[t]
 
-        # Count pixels exceeding P95 (captures storm extent, not just peak)
-        heavy_pixels_mask = (day_data >= p95) & land_mask_2d
+        # Count pixels exceeding P90 (captures storm extent, not just peak)
+        # NOTE: Using P90 instead of P95 because P95 of daily maxima is too strict
+        # for individual pixels. A tropical system with max=P99 might have 100 pixels
+        # at P90-P95 range, which we want to capture as organized structure.
+        heavy_pixels_mask = (day_data >= p90) & land_mask_2d
         num_heavy_pixels = np.sum(heavy_pixels_mask)
 
         # Also get max for fallback (extreme localized events)
@@ -110,7 +118,7 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
         mean_val = day_data[land_mask_2d].mean() if np.any(land_mask_2d) else 0
 
         # SPATIAL EXTENT LOGIC:
-        # Heavy if: (1) Widespread heavy rain (≥50 pixels > P95)
+        # Heavy if: (1) Widespread heavy rain (≥50 pixels > P90)
         #       OR  (2) Extreme localized peak (max > P99)
         if num_heavy_pixels >= MIN_HEAVY_PIXELS or max_val >= p99:
             # Classify as coastal vs interior based on WHERE the heavy rain is
@@ -272,16 +280,23 @@ def main(args):
             daily_max_values.append(land_values.max())
     
     daily_max_values = np.array(daily_max_values)
+    p85 = float(np.percentile(daily_max_values, 85))
+    p90 = float(np.percentile(daily_max_values, 90))
     p95 = float(np.percentile(daily_max_values, 95))
     p99 = float(np.percentile(daily_max_values, 99))
     p99_5 = float(np.percentile(daily_max_values, 99.5))
 
+    print(f"   P85 of daily max: {p85:.4f}")
+    print(f"   P90 of daily max: {p90:.4f}")
     print(f"   P95 of daily max: {p95:.4f}")
     print(f"   P99 of daily max: {p99:.4f}")
     print(f"   P99.5 of daily max: {p99_5:.4f}")
 
-    # Note: We only save P95 and P99 since these are used for spatial extent classification
+    # Note: We use P90 for pixel-level threshold (spatial extent)
+    # and P99 for extreme event detection
     thresholds = {
+        "P85": p85,
+        "P90": p90,
         "P95": p95,
         "P99": p99,
         "P99.5": p99_5
@@ -351,9 +366,10 @@ def main(args):
 
     # Categorize days using spatial extent approach
     print("   Categorizing days (using spatial extent criteria)...")
-    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p95, p99)
-    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p95, p99)
-    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p95, p99)
+    print(f"   Using P90={p90:.4f} for pixel threshold, P99={p99:.4f} for extreme events")
+    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p90, p95, p99)
+    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p90, p95, p99)
+    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p90, p95, p99)
 
     # Combine and adjust indices
     categories = {}
