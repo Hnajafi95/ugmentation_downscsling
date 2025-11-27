@@ -97,9 +97,11 @@ def categorize_days(Y_hr_array, land_mask_2d, p90, p95, p99):
     interior_mask = land_mask_2d & ~coastal_mask
 
     # Spatial extent threshold: How many pixels must exceed P90 to be "Heavy"
-    # 50 pixels ≈ 50 km² at 1km resolution ≈ 7km×7km storm (organized convection)
-    # This is ~0.4% of Florida land area (12,355 pixels)
-    MIN_HEAVY_PIXELS = 50
+    # CRITICAL: Data is 4km × 4km resolution (not 1km!)
+    # 25 pixels = 25 × 16 km²/pixel = 400 km² ≈ 20km × 20km organized system
+    # This captures mesoscale convection, sea breeze, fronts, tropical systems
+    # At 50 pixels (old), we only caught 28km × 28km+ systems (too restrictive)
+    MIN_HEAVY_PIXELS = 25  # Adjusted for 4km resolution
 
     for t in range(T):
         day_data = Y_hr_array[t]
