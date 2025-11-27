@@ -18,10 +18,13 @@ class EncoderX(nn.Module):
     """
     Encoder for low-resolution multi-variable inputs.
 
+    UPDATED: Returns BOTH a flat embedding for latent head AND spatial features for decoder.
+    This preserves spatial "where is the storm?" information.
+
     Input: X_lr of shape (B, C, 13, 11)
-    Output: h_X of shape (B, d_x)
+    Output: h_X of shape (B, d_x), spatial_features of shape (B, base_filters, 13, 11)
     """
-    
+
     def __init__(self, in_channels: int = 7, d_x: int = 64, base_filters: int = 32):
         """
         Args:
@@ -30,58 +33,58 @@ class EncoderX(nn.Module):
             base_filters: Number of filters in first conv layer
         """
         super().__init__()
-    
+
         self.in_channels = in_channels
         self.d_x = d_x
-    
-        # Convolutional layers
+        self.base_filters = base_filters
+
+        # Convolutional layers - REDUCED downsampling to preserve spatial info
         self.conv1 = nn.Conv2d(in_channels, base_filters, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(base_filters)
-    
+
+        # Only ONE downsampling layer instead of two (preserve more spatial resolution)
         self.conv2 = nn.Conv2d(base_filters, base_filters * 2, kernel_size=3, stride=2, padding=1)
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
-    
-        self.conv3 = nn.Conv2d(base_filters * 2, base_filters * 4, kernel_size=3, stride=2, padding=1)
-        self.bn3 = nn.BatchNorm2d(base_filters * 4)
-    
-        # Dynamically calculate flatten size
+
+        # Dynamically calculate flatten size (after only 1 downsample: 13x11 -> 7x6)
         with torch.no_grad():
             dummy_input = torch.zeros(1, in_channels, 13, 11)
-            dummy_output = self.conv1(dummy_input)
-            dummy_output = self.conv2(dummy_output)
-            dummy_output = self.conv3(dummy_output)
-            self.flatten_size = dummy_output.view(1, -1).shape[1]
-            print(f"[EncoderX] Dynamically computed flatten_size: {self.flatten_size}")
-    
-        # FC layers to embedding
+            h1 = self.conv1(dummy_input)
+            h2 = self.conv2(h1)
+            self.flatten_size = h2.view(1, -1).shape[1]
+            print(f"[EncoderX] Spatial features shape: {h1.shape[1:]} (preserved for decoder)")
+            print(f"[EncoderX] Flatten size for embedding: {self.flatten_size}")
+
+        # FC layers to embedding (for latent head)
         self.fc1 = nn.Linear(self.flatten_size, 256)
         self.fc2 = nn.Linear(256, d_x)
-    
+
         self.relu = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout(0.1)
-    
+
     def forward(self, x):
         """
         Args:
             x: (B, C, 13, 11)
 
         Returns:
-            h_X: (B, d_x)
+            h_X: (B, d_x) - flat embedding for latent head
+            spatial_features: (B, base_filters, 13, 11) - spatial features for decoder
         """
         # Conv blocks
-        h = self.relu(self.bn1(self.conv1(x)))          # (B, 32, 13, 11)
-        h = self.relu(self.bn2(self.conv2(h)))          # (B, 64, 6, 5)
-        h = self.relu(self.bn3(self.conv3(h)))          # (B, 128, 3, 2)
+        h1 = self.relu(self.bn1(self.conv1(x)))          # (B, 32, 13, 11) - KEEP THIS!
+        h2 = self.relu(self.bn2(self.conv2(h1)))         # (B, 64, 7, 6)
 
-        # Flatten
-        h = h.flatten(start_dim=1)                      # (B, 768)
+        # Output 1: Spatial features at highest resolution (for decoder)
+        spatial_features = h1  # (B, 32, 13, 11)
 
-        # FC layers
-        h = self.relu(self.fc1(h))                      # (B, 256)
+        # Output 2: Flat embedding (for latent head)
+        h_flat = h2.flatten(start_dim=1)                 # (B, flatten_size)
+        h = self.relu(self.fc1(h_flat))                  # (B, 256)
         h = self.dropout(h)
-        h_X = self.fc2(h)                                # (B, d_x)
+        h_X = self.fc2(h)                                 # (B, d_x)
 
-        return h_X
+        return h_X, spatial_features
 
 
 class EncoderY(nn.Module):
@@ -223,14 +226,17 @@ class LatentHead(nn.Module):
 
 class Decoder(nn.Module):
     """
-    Decoder that generates high-res precipitation conditioned on [z; h_X].
+    Decoder that generates high-res precipitation conditioned on [z; h_X] AND spatial_X.
 
-    Input: z (B, d_z), h_X (B, d_x)
+    UPDATED: Injects spatial features from EncoderX at every layer via concatenation.
+    This forces the decoder to "see" the storm location throughout upsampling.
+
+    Input: z (B, d_z), h_X (B, d_x), spatial_X (B, x_channels, 13, 11)
     Output: Y_hat (B, 1, H, W)
     """
 
     def __init__(self, d_z: int = 64, d_x: int = 64, H: int = 156, W: int = 132,
-                 base_filters: int = 64):
+                 base_filters: int = 64, x_channels: int = 32):
         """
         Args:
             d_z: Dimension of latent z
@@ -238,6 +244,7 @@ class Decoder(nn.Module):
             H: Target height
             W: Target width
             base_filters: Number of base filters for conv layers
+            x_channels: Number of channels in spatial_X features
         """
         super().__init__()
 
@@ -246,14 +253,9 @@ class Decoder(nn.Module):
         self.H = H
         self.W = W
 
-        # Calculate initial spatial dimensions using ceiling division
-        # This ensures we can upsample to exact target dimensions
-        # For H=156, W=132: H_init=20, W_init=17
-        self.H_init = (H + 7) // 8  # ceil(156/8) = 20
-        self.W_init = (W + 7) // 8  # ceil(132/8) = 17
-
-        # Pre-compute intermediate sizes for exact upsampling
-        # (20, 17) → (39, 33) → (78, 66) → (156, 132)
+        # Calculate initial spatial dimensions
+        self.H_init = (H + 7) // 8  # 20
+        self.W_init = (W + 7) // 8  # 17
         self.H_step1 = (H + 3) // 4  # 39
         self.W_step1 = (W + 3) // 4  # 33
         self.H_step2 = (H + 1) // 2  # 78
@@ -267,17 +269,21 @@ class Decoder(nn.Module):
         self.fc1 = nn.Linear(input_dim, 512)
         self.fc2 = nn.Linear(512, self.init_channels * self.H_init * self.W_init)
 
-        # Decoder blocks with upsampling (using exact sizes, not scale_factor)
-        # (B, 512, H_init, W_init) → (B, 256, H_step1, W_step1)
-        self.conv1 = nn.Conv2d(self.init_channels, base_filters * 4, kernel_size=3, padding=1)
+        # Projection layer for spatial_X (normalize channel depth)
+        self.x_proj = nn.Conv2d(x_channels, 32, kernel_size=1)
+
+        # Decoder blocks with SPATIAL INJECTION
+        # Input channels increased by 32 due to concatenation with spatial_X
+        # Block 1: (B, 512+32, ...) → (B, 256, ...)
+        self.conv1 = nn.Conv2d(self.init_channels + 32, base_filters * 4, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(base_filters * 4)
 
-        # (B, 256, H_step1, W_step1) → (B, 128, H_step2, W_step2)
-        self.conv2 = nn.Conv2d(base_filters * 4, base_filters * 2, kernel_size=3, padding=1)
+        # Block 2: (B, 256+32, ...) → (B, 128, ...)
+        self.conv2 = nn.Conv2d(base_filters * 4 + 32, base_filters * 2, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
 
-        # (B, 128, H_step2, W_step2) → (B, 64, H, W)
-        self.conv3 = nn.Conv2d(base_filters * 2, base_filters, kernel_size=3, padding=1)
+        # Block 3: (B, 128+32, ...) → (B, 64, ...)
+        self.conv3 = nn.Conv2d(base_filters * 2 + 32, base_filters, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(base_filters)
 
         # Final conv to output
@@ -285,11 +291,24 @@ class Decoder(nn.Module):
 
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, z, h_X):
+    def inject_spatial(self, feature_map, spatial_X):
+        """
+        Helper function to inject spatial_X into feature_map via concatenation.
+
+        Upsamples spatial_X to match feature_map size and concatenates.
+        """
+        # Upsample spatial_X to match feature_map spatial dimensions
+        x_resized = F.interpolate(spatial_X, size=feature_map.shape[-2:],
+                                   mode='bilinear', align_corners=False)
+        # Concatenate along channel dimension
+        return torch.cat([feature_map, x_resized], dim=1)
+
+    def forward(self, z, h_X, spatial_X):
         """
         Args:
             z: (B, d_z) latent code
             h_X: (B, d_x) conditioning embedding
+            spatial_X: (B, x_channels, 13, 11) spatial features from EncoderX
 
         Returns:
             Y_hat: (B, 1, H, W) generated precipitation
@@ -304,16 +323,21 @@ class Decoder(nn.Module):
         # Reshape to initial feature map
         h = h.view(-1, self.init_channels, self.H_init, self.W_init)  # (B, 512, 20, 17)
 
-        # Upsample blocks with exact target sizes (no rounding errors)
-        # Step 1: (20, 17) → (39, 33)
+        # Project spatial features
+        x_map = self.relu(self.x_proj(spatial_X))  # (B, 32, 13, 11)
+
+        # Block 1: Inject spatial, upsample, convolve
+        h = self.inject_spatial(h, x_map)  # (B, 512+32, 20, 17)
         h = F.interpolate(h, size=(self.H_step1, self.W_step1), mode='bilinear', align_corners=False)
         h = self.relu(self.bn1(self.conv1(h)))  # (B, 256, 39, 33)
 
-        # Step 2: (39, 33) → (78, 66)
+        # Block 2: Inject spatial, upsample, convolve
+        h = self.inject_spatial(h, x_map)  # (B, 256+32, 39, 33)
         h = F.interpolate(h, size=(self.H_step2, self.W_step2), mode='bilinear', align_corners=False)
         h = self.relu(self.bn2(self.conv2(h)))  # (B, 128, 78, 66)
 
-        # Step 3: (78, 66) → (156, 132)
+        # Block 3: Inject spatial, upsample, convolve
+        h = self.inject_spatial(h, x_map)  # (B, 128+32, 78, 66)
         h = F.interpolate(h, size=(self.H, self.W), mode='bilinear', align_corners=False)
         h = self.relu(self.bn3(self.conv3(h)))  # (B, 64, 156, 132)
 
@@ -321,8 +345,6 @@ class Decoder(nn.Module):
         Y_hat = self.conv_out(h)        # (B, 1, 156, 132)
 
         # DON'T apply ReLU - data is Z-score normalized (can have negative values)
-        # Denormalization to mm/day happens later in sample_cvae.py
-        # Applying ReLU here prevents the model from predicting dry conditions
         return Y_hat
 
 
@@ -357,10 +379,12 @@ class CVAE(nn.Module):
         """
         super().__init__()
 
-        self.encoder_X = EncoderX(in_channels_X, d_x, base_filters=32)
+        # EncoderX base_filters determines x_channels for decoder
+        encoder_x_base_filters = 32
+        self.encoder_X = EncoderX(in_channels_X, d_x, base_filters=encoder_x_base_filters)
         self.encoder_Y = EncoderY(in_channels_Y, static_channels, d_y, base_filters)
         self.latent_head = LatentHead(d_y, d_x, d_z)
-        self.decoder = Decoder(d_z, d_x, H, W, base_filters)
+        self.decoder = Decoder(d_z, d_x, H, W, base_filters, x_channels=encoder_x_base_filters)
 
         self.d_z = d_z
 
@@ -393,28 +417,30 @@ class CVAE(nn.Module):
             mu: (B, d_z)
             logvar: (B, d_z)
             h_X: (B, d_x)
+            spatial_X: (B, x_channels, 13, 11)
         """
-        h_X = self.encoder_X(X_lr)
+        h_X, spatial_X = self.encoder_X(X_lr)
         h_Y = self.encoder_Y(Y_hr, S)
         mu, logvar = self.latent_head(h_Y, h_X)
-        return mu, logvar, h_X
+        return mu, logvar, h_X, spatial_X
 
-    def decode(self, z, h_X):
+    def decode(self, z, h_X, spatial_X):
         """
-        Decode latent z conditioned on h_X.
+        Decode latent z conditioned on h_X and spatial_X.
 
         Args:
             z: (B, d_z)
             h_X: (B, d_x)
+            spatial_X: (B, x_channels, 13, 11)
 
         Returns:
             Y_hat: (B, 1, H, W)
         """
-        return self.decoder(z, h_X)
+        return self.decoder(z, h_X, spatial_X)
 
     def forward(self, X_lr, Y_hr, S):
         """
-        Full forward pass through cVAE.
+        Full forward pass through cVAE with spatial conditioning.
 
         Args:
             X_lr: (B, C, H_lr, W_lr) low-res inputs
@@ -426,20 +452,20 @@ class CVAE(nn.Module):
             mu: (B, d_z) latent mean
             logvar: (B, d_z) latent log variance
         """
-        # Encode
-        mu, logvar, h_X = self.encode(X_lr, Y_hr, S)
+        # Encode (now returns spatial_X too!)
+        mu, logvar, h_X, spatial_X = self.encode(X_lr, Y_hr, S)
 
         # Sample latent
         z = self.reparameterize(mu, logvar)
 
-        # Decode
-        Y_hat = self.decode(z, h_X)
+        # Decode with spatial conditioning
+        Y_hat = self.decode(z, h_X, spatial_X)
 
         return Y_hat, mu, logvar
 
     def sample(self, X_lr, S, z=None, use_prior=False):
         """
-        Generate sample conditioned on X_lr.
+        Generate sample conditioned on X_lr with spatial conditioning.
 
         Args:
             X_lr: (B, C, H_lr, W_lr)
@@ -450,7 +476,7 @@ class CVAE(nn.Module):
         Returns:
             Y_hat: (B, 1, H, W)
         """
-        h_X = self.encoder_X(X_lr)
+        h_X, spatial_X = self.encoder_X(X_lr)
 
         if z is None or use_prior:
             # Sample from prior
@@ -458,5 +484,5 @@ class CVAE(nn.Module):
             device = X_lr.device
             z = torch.randn(batch_size, self.d_z, device=device)
 
-        Y_hat = self.decode(z, h_X)
+        Y_hat = self.decode(z, h_X, spatial_X)
         return Y_hat

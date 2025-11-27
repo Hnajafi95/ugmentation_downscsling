@@ -44,8 +44,8 @@ loss:
   # Spatial gradient loss (NEW - encourages spatial pattern matching)
   lambda_gradient: 0.1  # Weight for gradient/edge preservation loss
 
-  # KL divergence (required for VAE) - CRITICAL FIX
-  beta_kl: 0.05       # Increased 100x from 0.0005 to prevent posterior-prior divergence
+  # KL divergence (required for VAE)
+  beta_kl: 0.01       # Reduced from 0.05 with spatial injection architecture (more freedom for diversity)
   warmup_epochs: 30   # Gradual warmup to avoid posterior collapse
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
