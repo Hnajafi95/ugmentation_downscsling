@@ -52,19 +52,29 @@ def compute_distance_to_coast(land_mask_2d, lat, lon):
     return dist_km.astype(np.float32)
 
 
-def categorize_days(Y_hr_array, land_mask_2d, p95, p98_5):
+def categorize_days(Y_hr_array, land_mask_2d, p95, p99):
     """
-    Categorize days as dry, moderate, heavy_coast, or heavy_interior.
+    Categorize days based on SPATIAL EXTENT of heavy rain.
 
-    UPDATED: Use P98.5 as threshold for "heavy" to expand training data.
-    This provides ~2x more heavy days compared to P99 (~250-300 vs 186),
-    while maintaining spatial coherence better than P97.5 (which was too aggressive).
+    NEW APPROACH: Instead of checking if ANY pixel exceeds threshold (which captures
+    noise/outliers), we check if a SIGNIFICANT AREA has heavy rain (captures storm systems).
+
+    Physics: Real heavy rain events (tropical systems, fronts, sea breeze) have spatial
+    extent. CNNs learn spatial patterns, so we need to feed them organized structures,
+    not isolated spikes.
+
+    Heavy Day Definition:
+    - ≥50 pixels exceed P95 intensity (captures organized storm systems)
+    - OR max pixel exceeds P99 (captures extreme localized events)
+
+    This naturally provides 600-800 training days with actual spatial structure,
+    vs 186 days with the old max-pixel approach.
 
     Args:
         Y_hr_array: (T, H, W) normalized log-scale precipitation
         land_mask_2d: (H, W) bool land mask
-        p95: P95 threshold for moderate rain
-        p98_5: P98.5 threshold for heavy rain (balanced expansion)
+        p95: P95 threshold for heavy rain intensity
+        p99: P99 threshold for extreme localized events
 
     Returns:
         categories: dict mapping day_id (str) to category (str)
@@ -83,34 +93,42 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p98_5):
 
     interior_mask = land_mask_2d & ~coastal_mask
 
+    # Spatial extent threshold: How many pixels must exceed P95 to be "Heavy"
+    # 50 pixels ≈ 50 km² at 1km resolution ≈ 7km×7km storm (organized convection)
+    # This is ~0.4% of Florida land area (12,355 pixels)
+    MIN_HEAVY_PIXELS = 50
+
     for t in range(T):
         day_data = Y_hr_array[t]
 
-        # Get land values
-        land_values = day_data[land_mask_2d]
-        max_val = land_values.max() if len(land_values) > 0 else 0
-        mean_val = land_values.mean() if len(land_values) > 0 else 0
+        # Count pixels exceeding P95 (captures storm extent, not just peak)
+        heavy_pixels_mask = (day_data >= p95) & land_mask_2d
+        num_heavy_pixels = np.sum(heavy_pixels_mask)
 
-        # UPDATED LOGIC: Use P98.5 for heavy threshold (balanced approach)
-        # This expands heavy training data from ~186 to ~250-300 days
-        # More conservative than P97.5 to maintain spatial coherence
-        if max_val >= p98_5:
-            # Heavy rain day - check if coastal or interior
-            coastal_values = day_data[coastal_mask & land_mask_2d]
-            interior_values = day_data[interior_mask]
+        # Also get max for fallback (extreme localized events)
+        max_val = day_data[land_mask_2d].max() if np.any(land_mask_2d) else 0
+        mean_val = day_data[land_mask_2d].mean() if np.any(land_mask_2d) else 0
 
-            coastal_max = coastal_values.max() if len(coastal_values) > 0 else 0
-            interior_max = interior_values.max() if len(interior_values) > 0 else 0
+        # SPATIAL EXTENT LOGIC:
+        # Heavy if: (1) Widespread heavy rain (≥50 pixels > P95)
+        #       OR  (2) Extreme localized peak (max > P99)
+        if num_heavy_pixels >= MIN_HEAVY_PIXELS or max_val >= p99:
+            # Classify as coastal vs interior based on WHERE the heavy rain is
+            # Sum heavy pixels in each region
+            heavy_coast_count = np.sum(heavy_pixels_mask & coastal_mask)
+            heavy_interior_count = np.sum(heavy_pixels_mask & interior_mask)
 
-            if interior_max >= p98_5:
+            if heavy_interior_count > heavy_coast_count:
                 categories[str(t)] = "heavy_interior"
             else:
                 categories[str(t)] = "heavy_coast"
+
         elif max_val >= p95:
-            # Moderate-to-strong rain (P95-P99 range)
+            # High intensity but small area (<50 pixels)
+            # These are isolated cells, not organized systems
             categories[str(t)] = "moderate"
-        elif mean_val >= p95 * 0.1:
-            # Light-to-moderate rain
+        elif mean_val >= 0.1:  # Threshold for wet days (normalized space)
+            # Light widespread rain
             categories[str(t)] = "moderate"
         else:
             # Dry or very light rain
@@ -255,21 +273,16 @@ def main(args):
     
     daily_max_values = np.array(daily_max_values)
     p95 = float(np.percentile(daily_max_values, 95))
-    p98 = float(np.percentile(daily_max_values, 98))
-    p98_5 = float(np.percentile(daily_max_values, 98.5))
     p99 = float(np.percentile(daily_max_values, 99))
     p99_5 = float(np.percentile(daily_max_values, 99.5))
 
     print(f"   P95 of daily max: {p95:.4f}")
-    print(f"   P98 of daily max: {p98:.4f}")
-    print(f"   P98.5 of daily max: {p98_5:.4f}")
     print(f"   P99 of daily max: {p99:.4f}")
     print(f"   P99.5 of daily max: {p99_5:.4f}")
 
+    # Note: We only save P95 and P99 since these are used for spatial extent classification
     thresholds = {
         "P95": p95,
-        "P98": p98,
-        "P98.5": p98_5,
         "P99": p99,
         "P99.5": p99_5
     }
@@ -336,11 +349,11 @@ def main(args):
         json.dump(h_w, f, indent=2)
     print(f"   Saved H_W.json")
 
-    # Categorize days
-    print("   Categorizing days...")
-    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p95, p98_5)
-    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p95, p98_5)
-    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p95, p98_5)
+    # Categorize days using spatial extent approach
+    print("   Categorizing days (using spatial extent criteria)...")
+    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p95, p99)
+    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p95, p99)
+    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p95, p99)
 
     # Combine and adjust indices
     categories = {}
