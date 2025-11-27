@@ -29,16 +29,16 @@ model:
 loss:
   type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
 
-  # Intensity weighting - OPTIMIZED based on data analysis
+  # Intensity weighting - TUNED to reduce over-emphasis on extremes
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
-  # Using P95 as scale (not P90 which was too aggressive)
-  scale: 20.0         # Based on P95 percentile - moderate emphasis
+  # Increased scale to reduce intensity weighting strength
+  scale: 25.0         # Increased from 20.0 - less aggressive weighting
   w_min: 0.1          # Min weight for light rain
   w_max: 3.0          # Allow stronger extreme emphasis
 
   # Extra boost for extreme tail (P99+)
-  # With scale=20, P99 gets base weight=2.18, with tail_boost=2.0 → effective=4.36 (44x vs light)
-  tail_boost: 2.0     # Strong emphasis on P99+ extremes
+  # Reduced from 2.0 to prevent over-focus on extremes that hurts spatial coherence
+  tail_boost: 1.5     # Moderate emphasis on P99+ extremes (reduced from 2.0)
 
   # Mass conservation (optional, small weight)
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
@@ -51,17 +51,17 @@ loss:
 
 # Training configuration
 train:
-  epochs: 150
+  epochs: 250           # Increased from 150 to allow more training time
   batch_size: 64
   num_workers: 2
   lr: 0.0003            # Increased from 0.0001 for faster convergence
-  weight_decay: 0.0005  # Regularization
+  weight_decay: 0.001   # Increased from 0.0005 to compensate for removed ReLU regularization
   grad_clip: 1.0
   amp: true
   save_every: 10
 
   # Early stopping
-  early_stopping_patience: 40
+  early_stopping_patience: 60  # Increased from 40 to prevent premature stopping
   early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
   early_stopping_min_delta: 0.001    # Minimum improvement to count
 
@@ -75,7 +75,7 @@ train:
 # Learning rate scheduler
 scheduler:
   type: "cosine"
-  T_max: 150
+  T_max: 250  # Updated to match new epoch count
   eta_min: 0.000001
 
 # Validation
