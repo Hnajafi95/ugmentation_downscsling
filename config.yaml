@@ -44,7 +44,7 @@ loss:
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
 
   # KL divergence (required for VAE)
-  beta_kl: 0.001      # Very light regularization (reduced from 0.01 to prevent posterior collapse)
+  beta_kl: 0.0005     # Further reduced from 0.001 - allow posterior to diverge more for diversity
   warmup_epochs: 20   # KL warm-up (increased from 15)
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
@@ -85,11 +85,11 @@ validation:
 
 # Sampling
 sampling:
-  mode: "prior"  # Changed from "posterior" to test diversity
+  mode: "posterior"  # Use posterior - it learned heavy rain patterns (prior shows almost no extremes)
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 1.5  # Increased from 1.2 to improve sample diversity
+  temperature: 2.0  # Increased from 1.5 - multiply std by 2.0 for more diverse samples
   # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
 
 # Device
