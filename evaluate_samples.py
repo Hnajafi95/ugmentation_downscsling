@@ -47,6 +47,92 @@ def load_model(checkpoint_path, config):
     return model
 
 
+def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=5):
+    """
+    Load pre-generated samples from disk (created by sample_cvae.py).
+
+    Args:
+        synth_dir: Path to directory containing saved samples
+        dataset: CvaeDataset instance for loading real data
+        num_days: Number of heavy days to load
+        samples_per_day: Number of samples per day (K)
+
+    Returns:
+        real_samples: (N, H, W) real heavy precipitation days
+        generated_samples: (N, K, H, W) generated samples (K per real day)
+        X_lr_samples: (N, C, H_lr, W_lr) corresponding low-res inputs
+    """
+    print(f"Loading saved samples from: {synth_dir}")
+
+    # Get heavy day indices from categories
+    categories_path = Path(dataset.data_root) / "metadata" / "categories.json"
+    with open(categories_path, 'r') as f:
+        categories = json.load(f)
+
+    heavy_indices = []
+    for day_id_str, category in categories.items():
+        if category in ["heavy_coast", "heavy_interior"]:
+            heavy_indices.append(int(day_id_str))
+
+    heavy_indices.sort()
+    print(f"Found {len(heavy_indices)} heavy precipitation days in metadata")
+
+    # Convert day_ids to dataset indices
+    day_id_to_idx = {day_id: idx for idx, day_id in enumerate(dataset.day_ids)}
+
+    valid_day_ids = []
+    for day_id in heavy_indices:
+        if day_id in day_id_to_idx:
+            valid_day_ids.append(day_id)
+
+    print(f"Found {len(valid_day_ids)} heavy days in current dataset split")
+
+    # Limit to num_days
+    valid_day_ids = valid_day_ids[:num_days]
+
+    real_samples = []
+    generated_samples = []
+    X_lr_samples = []
+
+    loaded_count = 0
+    for day_id in valid_day_ids:
+        # Load real sample from dataset
+        idx = day_id_to_idx[day_id]
+        sample = dataset[idx]
+        real_samples.append(sample['Y_hr'].numpy())  # (1, H, W)
+        X_lr_samples.append(sample['X_lr'].numpy())  # (C, H_lr, W_lr)
+
+        # Load K generated samples for this day
+        day_generated = []
+        for k in range(samples_per_day):
+            synth_path = Path(synth_dir) / f"day_{day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
+
+            if not synth_path.exists():
+                print(f"Warning: Missing sample {synth_path}")
+                continue
+
+            Y_syn = np.load(synth_path)  # (1, H, W)
+            day_generated.append(Y_syn[0])  # Take (H, W)
+
+        if len(day_generated) == samples_per_day:
+            generated_samples.append(np.stack(day_generated))
+            loaded_count += 1
+        else:
+            print(f"Warning: Day {day_id} has incomplete samples ({len(day_generated)}/{samples_per_day})")
+
+    if loaded_count == 0:
+        raise ValueError(f"No saved samples found in {synth_dir}. "
+                        f"Run sample_cvae.py first to generate samples.")
+
+    print(f"Successfully loaded {loaded_count} days with {samples_per_day} samples each")
+
+    real_samples = np.stack([r[0] for r in real_samples])  # (N, H, W)
+    generated_samples = np.stack(generated_samples)          # (N, K, H, W)
+    X_lr_samples = np.stack(X_lr_samples)                    # (N, C, H_lr, W_lr)
+
+    return real_samples, generated_samples, X_lr_samples
+
+
 def generate_samples(model, dataset, num_days=50, samples_per_day=5, device='cuda'):
     """
     Generate samples from heavy precipitation days.
@@ -107,11 +193,12 @@ def generate_samples(model, dataset, num_days=50, samples_per_day=5, device='cud
             real_samples.append(Y_hr.squeeze().cpu().numpy())
             X_lr_samples.append(X_lr.squeeze().cpu().numpy())
 
-            # Generate K samples
+            # Generate K samples from prior
+            # NOTE: This function generates samples on-the-fly with hardcoded prior mode.
+            # To evaluate posterior samples, use sample_cvae.py to save them first,
+            # then run evaluate_samples.py without --checkpoint to load the saved samples.
             batch_generated = []
             for k in range(samples_per_day):
-                # Sample from prior (Note: evaluate_samples always uses prior for fair comparison)
-                # To evaluate posterior mode, run sample_cvae.py with --mode posterior first
                 Y_gen = model.sample(X_lr, S, use_prior=True)
                 batch_generated.append(Y_gen.squeeze().cpu().numpy())
 
@@ -222,17 +309,32 @@ def compute_diversity_score(generated):
     return np.mean(diversities), np.std(diversities)
 
 
-def evaluate_model(model, dataset, device='cuda', num_days=50, samples_per_day=5):
+def evaluate_model(model, dataset, device='cuda', num_days=50, samples_per_day=5, synth_dir=None):
     """
     Comprehensive evaluation of cVAE model.
+
+    Args:
+        model: cVAE model (only needed if synth_dir is None)
+        dataset: CvaeDataset instance
+        device: Device for model inference
+        num_days: Number of days to evaluate
+        samples_per_day: Number of samples per day
+        synth_dir: If provided, load saved samples from this directory instead of generating
 
     Returns:
         metrics: Dictionary of evaluation metrics
     """
-    print("Generating samples for evaluation...")
-    real, generated, X_lr = generate_samples(
-        model, dataset, num_days, samples_per_day, device
-    )
+    if synth_dir is not None:
+        # Load pre-generated samples from disk
+        real, generated, X_lr = load_saved_samples(
+            synth_dir, dataset, num_days, samples_per_day
+        )
+    else:
+        # Generate samples on-the-fly
+        print("Generating samples for evaluation...")
+        real, generated, X_lr = generate_samples(
+            model, dataset, num_days, samples_per_day, device
+        )
 
     # Load land mask and thresholds
     land_mask_path = Path(dataset.data_root) / "statics" / "land_sea_mask.npy"
@@ -365,16 +467,34 @@ def main(args):
         normalize_statics=config['statics']['normalize_statics']
     )
 
-    # Load model
-    print(f"Loading model from: {args.checkpoint}")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(args.checkpoint, config)
+    # Determine synth_dir
+    if args.synth_dir:
+        synth_dir = args.synth_dir
+        print(f"Evaluating saved samples from: {synth_dir}")
+        model = None
+        device = None
+    else:
+        # Default: load from outputs_root/synth
+        synth_dir = Path(config['outputs_root']) / "synth"
+        if synth_dir.exists():
+            print(f"Found saved samples in: {synth_dir}")
+            model = None
+            device = None
+        else:
+            # No saved samples - need to generate on-the-fly
+            if not args.checkpoint:
+                raise ValueError("Either --synth_dir or --checkpoint must be provided")
+            print(f"No saved samples found. Loading model from: {args.checkpoint}")
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = load_model(args.checkpoint, config)
+            synth_dir = None
 
     # Evaluate
     metrics, real, generated = evaluate_model(
         model, dataset, device,
         num_days=args.num_days,
-        samples_per_day=args.samples_per_day
+        samples_per_day=args.samples_per_day,
+        synth_dir=synth_dir
     )
 
     # Print summary
@@ -392,17 +512,23 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate cVAE generated samples")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to model checkpoint")
+    parser = argparse.ArgumentParser(
+        description="Evaluate cVAE generated samples",
+        epilog="By default, loads saved samples from outputs_root/synth. "
+               "Use --synth_dir to specify a different location, or --checkpoint to generate on-the-fly."
+    )
     parser.add_argument("--config", type=str, required=True,
                         help="Path to config file")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to model checkpoint (only needed if generating samples on-the-fly)")
+    parser.add_argument("--synth_dir", type=str, default=None,
+                        help="Directory containing saved samples (default: outputs_root/synth from config)")
     parser.add_argument("--output", type=str, default="evaluation_results.json",
                         help="Path to save evaluation metrics")
     parser.add_argument("--num_days", type=int, default=50,
                         help="Number of heavy days to evaluate")
     parser.add_argument("--samples_per_day", type=int, default=5,
-                        help="Number of samples to generate per day")
+                        help="Number of samples per day")
 
     args = parser.parse_args()
     main(args)
