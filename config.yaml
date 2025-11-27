@@ -44,8 +44,8 @@ loss:
   lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
 
   # KL divergence (required for VAE)
-  beta_kl: 0.01       # Light regularization
-  warmup_epochs: 15   # KL warm-up
+  beta_kl: 0.001      # Very light regularization (reduced from 0.01 to prevent posterior collapse)
+  warmup_epochs: 20   # KL warm-up (increased from 15)
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
@@ -85,7 +85,7 @@ validation:
 
 # Sampling
 sampling:
-  mode: "posterior"
+  mode: "prior"  # Changed from "posterior" to test diversity
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
@@ -94,4 +94,4 @@ sampling:
 
 # Device
 device: "cuda"
-seed: 42
+# seed: 42  # REMOVED - was making samples deterministic!
