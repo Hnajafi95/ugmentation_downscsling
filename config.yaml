@@ -94,4 +94,4 @@ sampling:
 
 # Device
 device: "cuda"
-seed: 42
+# seed: 42  # REMOVED - was making samples deterministic!
