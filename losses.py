@@ -194,6 +194,37 @@ def kl_divergence(mu, logvar):
     return kl_loss
 
 
+def spatial_gradient_loss(y_true, y_hat):
+    """
+    Spatial gradient matching loss to preserve edges and spatial patterns.
+
+    This encourages the model to match spatial structure (gradients/edges),
+    not just pixel-wise intensity values. Critical for learning realistic
+    precipitation patterns rather than smooth blobs.
+
+    Computes L1 loss on spatial gradients in both x and y directions.
+
+    Args:
+        y_true: (B, 1, H, W) ground truth
+        y_hat: (B, 1, H, W) predictions
+
+    Returns:
+        loss: Scalar gradient matching loss
+    """
+    # Compute gradients in y direction (vertical)
+    dy_true = y_true[:, :, 1:, :] - y_true[:, :, :-1, :]
+    dy_hat = y_hat[:, :, 1:, :] - y_hat[:, :, :-1, :]
+
+    # Compute gradients in x direction (horizontal)
+    dx_true = y_true[:, :, :, 1:] - y_true[:, :, :, :-1]
+    dx_hat = y_hat[:, :, :, 1:] - y_hat[:, :, :, :-1]
+
+    # L1 loss on gradients
+    grad_loss = F.l1_loss(dy_hat, dy_true) + F.l1_loss(dx_hat, dx_true)
+
+    return grad_loss
+
+
 class SimplifiedCVAELoss(nn.Module):
     """
     Simplified cVAE loss with ONE unified reconstruction objective.
@@ -217,6 +248,7 @@ class SimplifiedCVAELoss(nn.Module):
                  w_max: float = 2.0,
                  tail_boost: float = 1.5,
                  lambda_mass: float = 0.01,
+                 lambda_gradient: float = 0.1,
                  beta_kl: float = 0.01,
                  warmup_epochs: int = 15):
         """
@@ -229,6 +261,7 @@ class SimplifiedCVAELoss(nn.Module):
             w_min, w_max: Weight bounds
             tail_boost: Extra multiplier for P99+ (default 1.5)
             lambda_mass: Weight for mass conservation (keep small)
+            lambda_gradient: Weight for spatial gradient matching (default 0.1)
             beta_kl: Final KL weight (required for VAE)
             warmup_epochs: KL warmup epochs
         """
@@ -240,6 +273,7 @@ class SimplifiedCVAELoss(nn.Module):
         self.w_max = w_max
         self.tail_boost = tail_boost
         self.lambda_mass = lambda_mass
+        self.lambda_gradient = lambda_gradient
         self.beta_kl = beta_kl
         self.warmup_epochs = warmup_epochs
 
@@ -266,7 +300,7 @@ class SimplifiedCVAELoss(nn.Module):
 
     def forward(self, y_true, y_hat, mu, logvar, land_mask):
         """
-        Compute simplified loss in mm/day space.
+        Compute simplified loss in mm/day space with spatial gradient matching.
 
         Args:
             y_true: (B, 1, H, W) normalized precipitation
@@ -287,17 +321,24 @@ class SimplifiedCVAELoss(nn.Module):
         # 2. Mass conservation (optional, but good for physical consistency)
         m_loss = mass_loss(y_true, y_hat, land_mask)
 
-        # 3. KL divergence (required for VAE)
+        # 3. Spatial gradient matching (NEW - preserves spatial patterns/edges)
+        grad_loss = spatial_gradient_loss(y_true, y_hat)
+
+        # 4. KL divergence (required for VAE)
         kl_loss = kl_divergence(mu, logvar)
 
-        # Total loss (ONLY 3 TERMS instead of 4+!)
-        total_loss = rec_loss + self.lambda_mass * m_loss + self.current_beta * kl_loss
+        # Total loss (4 terms: reconstruction + mass + gradient + KL)
+        total_loss = (rec_loss +
+                      self.lambda_mass * m_loss +
+                      self.lambda_gradient * grad_loss +
+                      self.current_beta * kl_loss)
 
         # For logging
         loss_dict = {
             'loss': total_loss,
             'L_rec': rec_loss,
             'L_mass': m_loss,
+            'L_grad': grad_loss,
             'L_kl': kl_loss,
             'beta': self.current_beta,
             'weights_mean': rec_info['weights_mean'],

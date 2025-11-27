@@ -13,39 +13,40 @@ statics:
   use_elevation: false
   normalize_statics: true
 
-# Model architecture - Reduced size
+# Model architecture
 model:
   d_x: 64
   in_channels_X: 6
   d_y: 256
   in_channels_Y: 1
   static_channels: 2
-  d_z: 64
+  d_z: 128  # Increased from 64 for better spatial pattern capacity
   H: 156
   W: 132
-  base_filters: 64  # Reduced from 96 (less overfitting)
+  base_filters: 96  # Increased from 64 to improve spatial learning
 
 # Loss function - SIMPLIFIED!
 loss:
   type: "simplified"  # Use SimplifiedCVAELoss instead of CVAELoss
 
-  # Intensity weighting - BALANCED across all precipitation intensities
+  # Intensity weighting - Based on data analysis (P90 = 11.7 mm/day)
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
-  # Increased scale significantly to reduce emphasis on extremes
-  scale: 35.0         # Increased from 25.0 - much less aggressive weighting
+  scale: 11.7         # Based on P90 recommendation from analyze_parameters.py
   w_min: 0.1          # Min weight for light rain
-  w_max: 3.0          # Allow stronger extreme emphasis
+  w_max: 2.0          # Reduced from 3.0 to avoid over-emphasis on extremes
 
   # Extra boost for extreme tail (P99+)
-  # REMOVED tail_boost to force model to learn ALL spatial patterns equally
-  tail_boost: 1.0     # No extra boost (was 1.5) - learn light+heavy equally
+  tail_boost: 1.5     # Moderate boost for P99+ pixels to improve extreme precipitation
 
   # Mass conservation (optional, small weight)
-  lambda_mass: 0.005  # Reduced from 0.01 (less constraint)
+  lambda_mass: 0.005  # Small weight for physical consistency
 
-  # KL divergence (required for VAE)
-  beta_kl: 0.0005     # Further reduced from 0.001 - allow posterior to diverge more for diversity
-  warmup_epochs: 20   # KL warm-up (increased from 15)
+  # Spatial gradient loss (NEW - encourages spatial pattern matching)
+  lambda_gradient: 0.1  # Weight for gradient/edge preservation loss
+
+  # KL divergence (required for VAE) - CRITICAL FIX
+  beta_kl: 0.05       # Increased 100x from 0.0005 to prevent posterior-prior divergence
+  warmup_epochs: 30   # Gradual warmup to avoid posterior collapse
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
@@ -85,11 +86,11 @@ validation:
 
 # Sampling
 sampling:
-  mode: "posterior"  # Use posterior - it learned heavy rain patterns (prior shows almost no extremes)
+  mode: "prior"  # Use prior - with fixed KL divergence, prior sampling should work
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 1.0  
+  temperature: 0.7  # Reduced from 1.0 to better match learned posterior scale
   # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
 
 # Device

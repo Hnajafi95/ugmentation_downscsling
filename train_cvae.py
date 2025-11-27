@@ -92,6 +92,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
     total_loss = 0.0
     total_rec = 0.0
     total_mass = 0.0
+    total_grad = 0.0
     total_kl = 0.0
     n_batches = 0
 
@@ -133,6 +134,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
         total_loss += loss.item()
         total_rec += loss_dict['L_rec'].item()
         total_mass += loss_dict['L_mass'].item()
+        total_grad += loss_dict.get('L_grad', 0.0) if isinstance(loss_dict.get('L_grad', 0.0), float) else loss_dict.get('L_grad', torch.tensor(0.0)).item()
         total_kl += loss_dict['L_kl'].item()
         n_batches += 1
 
@@ -148,12 +150,14 @@ def train_epoch(model, train_loader, criterion, optimizer, scaler, device, confi
     avg_loss = total_loss / n_batches
     avg_rec = total_rec / n_batches
     avg_mass = total_mass / n_batches
+    avg_grad = total_grad / n_batches
     avg_kl = total_kl / n_batches
 
     metrics = {
         'loss': avg_loss,
         'L_rec': avg_rec,
         'L_mass': avg_mass,
+        'L_grad': avg_grad,
         'L_kl': avg_kl,
         'beta': criterion.current_beta
     }
@@ -169,6 +173,7 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
     total_loss = 0.0
     total_rec = 0.0
     total_mass = 0.0
+    total_grad = 0.0
     total_kl = 0.0
     n_batches = 0
 
@@ -198,6 +203,7 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
             total_loss += loss_dict['loss'].item()
             total_rec += loss_dict['L_rec'].item()
             total_mass += loss_dict['L_mass'].item()
+            total_grad += loss_dict.get('L_grad', 0.0) if isinstance(loss_dict.get('L_grad', 0.0), float) else loss_dict.get('L_grad', torch.tensor(0.0)).item()
             total_kl += loss_dict['L_kl'].item()
             n_batches += 1
 
@@ -208,6 +214,7 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
     avg_loss = total_loss / n_batches
     avg_rec = total_rec / n_batches
     avg_mass = total_mass / n_batches
+    avg_grad = total_grad / n_batches
     avg_kl = total_kl / n_batches
 
     # Compute metrics
@@ -216,6 +223,7 @@ def validate_epoch(model, val_loader, criterion, device, config, p95, land_mask,
         'loss': avg_loss,
         'L_rec': avg_rec,
         'L_mass': avg_mass,
+        'L_grad': avg_grad,
         'L_kl': avg_kl,
         'beta': criterion.current_beta
     })
@@ -395,7 +403,7 @@ def main(args):
     print(f"\nCreating loss criterion: {loss_type}")
 
     if loss_type == 'simplified':
-        # Simplified loss: ONE weighted reconstruction + mass + KL (in mm/day space!)
+        # Simplified loss: weighted reconstruction + mass + gradient + KL (in mm/day space!)
         criterion = SimplifiedCVAELoss(
             p99_mmday=p99_mmday,
             mean_pr=mean_pr,
@@ -405,11 +413,13 @@ def main(args):
             w_max=config['loss'].get('w_max', 2.0),
             tail_boost=config['loss'].get('tail_boost', 1.5),
             lambda_mass=config['loss'].get('lambda_mass', 0.01),
+            lambda_gradient=config['loss'].get('lambda_gradient', 0.1),
             beta_kl=config['loss']['beta_kl'],
             warmup_epochs=config['loss']['warmup_epochs']
         )
         print(f"  Intensity weighting in mm/day space: scale={config['loss'].get('scale', 36.6)}, "
               f"tail_boost={config['loss'].get('tail_boost', 1.5)}")
+        print(f"  Spatial gradient loss weight: {config['loss'].get('lambda_gradient', 0.1)}")
 
     elif loss_type == 'minimal':
         # Minimal loss: ONLY weighted reconstruction + KL (no mass conservation, in mm/day space!)
@@ -439,8 +449,8 @@ def main(args):
 
     # Initialize CSV log
     log_file = logs_dir / "train_log.csv"
-    log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_kl',
-                  'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_kl',
+    log_fields = ['epoch', 'train_loss', 'train_L_rec', 'train_L_mass', 'train_L_grad', 'train_L_kl',
+                  'val_loss', 'val_L_rec', 'val_L_mass', 'val_L_grad', 'val_L_kl',
                   'val_MAE_all', 'val_MAE_tail', 'val_RMSE_all', 'val_mass_bias',
                   'val_MAE_all_zspace', 'val_MAE_tail_zspace',
                   'beta', 'lr', 'val_combined_metric']
@@ -506,10 +516,12 @@ def main(args):
                     'train_loss': train_metrics['loss'],
                     'train_L_rec': train_metrics['L_rec'],
                     'train_L_mass': train_metrics['L_mass'],
+                    'train_L_grad': train_metrics['L_grad'],
                     'train_L_kl': train_metrics['L_kl'],
                     'val_loss': val_metrics['loss'],
                     'val_L_rec': val_metrics['L_rec'],
                     'val_L_mass': val_metrics['L_mass'],
+                    'val_L_grad': val_metrics['L_grad'],
                     'val_L_kl': val_metrics['L_kl'],
                     'val_MAE_all': val_metrics['MAE_all'],
                     'val_MAE_tail': val_metrics['MAE_tail'],
