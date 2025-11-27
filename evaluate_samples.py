@@ -110,7 +110,8 @@ def generate_samples(model, dataset, num_days=50, samples_per_day=5, device='cud
             # Generate K samples
             batch_generated = []
             for k in range(samples_per_day):
-                # Sample from prior
+                # Sample from prior (Note: evaluate_samples always uses prior for fair comparison)
+                # To evaluate posterior mode, run sample_cvae.py with --mode posterior first
                 Y_gen = model.sample(X_lr, S, use_prior=True)
                 batch_generated.append(Y_gen.squeeze().cpu().numpy())
 
