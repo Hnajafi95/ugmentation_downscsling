@@ -260,8 +260,12 @@ def main(args):
     config = load_config(args.config)
     print(f"\nLoaded config from: {args.config}")
 
-    # Set random seed
-    set_seed(config['seed'])
+    # Set random seed (optional for reproducibility)
+    if 'seed' in config and config['seed'] is not None:
+        set_seed(config['seed'])
+        print(f"Random seed set to: {config['seed']}")
+    else:
+        print("No random seed set - training will be non-deterministic")
 
     # Set device
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
