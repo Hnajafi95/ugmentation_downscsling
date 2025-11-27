@@ -52,18 +52,19 @@ def compute_distance_to_coast(land_mask_2d, lat, lon):
     return dist_km.astype(np.float32)
 
 
-def categorize_days(Y_hr_array, land_mask_2d, p95, p97_5):
+def categorize_days(Y_hr_array, land_mask_2d, p95, p98_5):
     """
     Categorize days as dry, moderate, heavy_coast, or heavy_interior.
 
-    UPDATED: Use P97.5 as threshold for "heavy" to expand training data.
-    This provides ~3x more heavy days compared to P99, improving model generalization.
+    UPDATED: Use P98.5 as threshold for "heavy" to expand training data.
+    This provides ~2x more heavy days compared to P99 (~250-300 vs 186),
+    while maintaining spatial coherence better than P97.5 (which was too aggressive).
 
     Args:
         Y_hr_array: (T, H, W) normalized log-scale precipitation
         land_mask_2d: (H, W) bool land mask
         p95: P95 threshold for moderate rain
-        p97_5: P97.5 threshold for heavy rain (relaxed from P99)
+        p98_5: P98.5 threshold for heavy rain (balanced expansion)
 
     Returns:
         categories: dict mapping day_id (str) to category (str)
@@ -90,9 +91,10 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p97_5):
         max_val = land_values.max() if len(land_values) > 0 else 0
         mean_val = land_values.mean() if len(land_values) > 0 else 0
 
-        # UPDATED LOGIC: Use P97.5 for heavy threshold (relaxed from P99)
-        # This expands heavy training data from ~186 to ~500+ days
-        if max_val >= p97_5:
+        # UPDATED LOGIC: Use P98.5 for heavy threshold (balanced approach)
+        # This expands heavy training data from ~186 to ~250-300 days
+        # More conservative than P97.5 to maintain spatial coherence
+        if max_val >= p98_5:
             # Heavy rain day - check if coastal or interior
             coastal_values = day_data[coastal_mask & land_mask_2d]
             interior_values = day_data[interior_mask]
@@ -100,7 +102,7 @@ def categorize_days(Y_hr_array, land_mask_2d, p95, p97_5):
             coastal_max = coastal_values.max() if len(coastal_values) > 0 else 0
             interior_max = interior_values.max() if len(interior_values) > 0 else 0
 
-            if interior_max >= p97_5:
+            if interior_max >= p98_5:
                 categories[str(t)] = "heavy_interior"
             else:
                 categories[str(t)] = "heavy_coast"
@@ -253,18 +255,21 @@ def main(args):
     
     daily_max_values = np.array(daily_max_values)
     p95 = float(np.percentile(daily_max_values, 95))
-    p97_5 = float(np.percentile(daily_max_values, 97.5))
+    p98 = float(np.percentile(daily_max_values, 98))
+    p98_5 = float(np.percentile(daily_max_values, 98.5))
     p99 = float(np.percentile(daily_max_values, 99))
     p99_5 = float(np.percentile(daily_max_values, 99.5))
 
     print(f"   P95 of daily max: {p95:.4f}")
-    print(f"   P97.5 of daily max: {p97_5:.4f}")
+    print(f"   P98 of daily max: {p98:.4f}")
+    print(f"   P98.5 of daily max: {p98_5:.4f}")
     print(f"   P99 of daily max: {p99:.4f}")
     print(f"   P99.5 of daily max: {p99_5:.4f}")
 
     thresholds = {
         "P95": p95,
-        "P97.5": p97_5,
+        "P98": p98,
+        "P98.5": p98_5,
         "P99": p99,
         "P99.5": p99_5
     }
@@ -333,9 +338,9 @@ def main(args):
 
     # Categorize days
     print("   Categorizing days...")
-    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p95, p97_5)
-    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p95, p97_5)
-    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p95, p97_5)
+    categories_train = categorize_days(Y_train[:train_size, 0], land_mask_2d, p95, p98_5)
+    categories_val = categorize_days(Y_train[train_size:, 0], land_mask_2d, p95, p98_5)
+    categories_test = categorize_days(Y_test[:, 0], land_mask_2d, p95, p98_5)
 
     # Combine and adjust indices
     categories = {}
