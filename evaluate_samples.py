@@ -254,6 +254,12 @@ def compute_extreme_value_distribution(real, generated, land_mask, p95):
     gen_flat = generated.reshape(-1)
     gen_extremes = gen_flat[gen_flat >= p95]
 
+    # Check if both distributions have sufficient samples
+    if len(real_extremes) < 2 or len(gen_extremes) < 2:
+        print(f"  ⚠ Warning: Insufficient extreme values for KS test")
+        print(f"    Real extremes: {len(real_extremes)}, Generated extremes: {len(gen_extremes)}")
+        return np.nan, np.nan
+
     # KS test
     ks_stat, p_value = ks_2samp(real_extremes, gen_extremes)
 

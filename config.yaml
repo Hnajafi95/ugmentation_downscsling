@@ -45,7 +45,8 @@ loss:
   lambda_gradient: 0.1  # Weight for gradient/edge preservation loss
 
   # KL divergence (required for VAE)
-  beta_kl: 0.03       # Increased from 0.01 - need stronger constraint for prior matching
+  beta_kl: 0.05       # Increased from 0.03 to 0.05 - stronger prior matching
+                      # Target: KL < 128 (1.0 per dimension) for good prior-posterior alignment
   warmup_epochs: 30   # Gradual warmup to avoid posterior collapse
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
@@ -90,8 +91,11 @@ sampling:
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 1.5  # Increased from 0.7 - sample from wider distribution to match posterior scale
-  # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
+  temperature: 0.9  # CRITICAL FIX: Must match training posterior std (~1.1) for prior mode
+                    # With beta_kl=0.05, KL~18 means posterior std~1.1
+                    # Temperature=1.5 was too high, causing severe underprediction
+                    # Lower temperature (0.9-1.0) samples from trained latent space
+  pixel_threshold: 0.1  # Physical detection limit for rain gauges (mm/day)
 
 # Device
 device: "cuda"
