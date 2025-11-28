@@ -267,8 +267,8 @@ def main(args):
                 Y_hr_normalized = load_day_Y_hr(data_root.parent / "data", day_id)  # (1, H, W) normalized
                 Y_hr = torch.from_numpy(Y_hr_normalized).float().unsqueeze(0).to(device)  # (1, 1, H, W)
 
-                # Encode to get posterior
-                mu, logvar, h_X = model.encode(X_lr, Y_hr, S_batch)
+                # Encode to get posterior (returns spatial_X too!)
+                mu, logvar, h_X, spatial_X = model.encode(X_lr, Y_hr, S_batch)
 
                 # Compute reference mass for threshold check (in mm/day space)
                 Y_hr_mmday = denormalize_to_mmday(Y_hr_normalized, mean_pr, std_pr)  # (1, H, W)
@@ -277,7 +277,8 @@ def main(args):
                 # Prior mode: sample z ~ N(0, I)
                 mu = None
                 logvar = None
-                h_X = model.encoder_X(X_lr)
+                # Get both h_X and spatial_X from encoder
+                h_X, spatial_X = model.encoder_X(X_lr)
                 mass_ref = None  # No reference in prior mode
 
             # Generate K samples for this day
@@ -292,8 +293,8 @@ def main(args):
                     # Sample from prior
                     z = torch.randn(1, model.d_z, device=device) * temperature
 
-                # Decode
-                Y_hat = model.decode(z, h_X)  # (1, 1, H, W)
+                # Decode with spatial conditioning
+                Y_hat = model.decode(z, h_X, spatial_X)  # (1, 1, H, W)
 
                 # Convert to numpy (still in normalized space)
                 Y_hat_normalized = Y_hat.cpu().numpy()[0]  # (1, H, W)
