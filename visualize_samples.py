@@ -87,19 +87,29 @@ def load_real_data(config, day_ids):
     return real_data
 
 
-def load_synth_data(synth_dir, day_ids):
-    """Load synthesized precipitation data for given day IDs."""
+def load_synth_data(synth_dir, day_ids, max_samples=None):
+    """Load synthesized precipitation data for given day IDs.
+
+    Args:
+        synth_dir: Directory containing samples
+        day_ids: List of day IDs to load
+        max_samples: Maximum number of samples to load per day (None = load all)
+    """
     synth_data = []
 
     for day_id in day_ids:
         # Find all samples for this day
         # Filename format: day_XXXXX_sample_YY.Y_hr_syn.npy
         day_samples = []
-        for k in range(10):  # Check up to 10 samples per day
+        check_range = max_samples if max_samples is not None else 10
+        for k in range(check_range):  # Check up to max_samples per day
             file_path = synth_dir / f"day_{day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
             if file_path.exists():
                 data = np.load(file_path)
                 day_samples.append(data)
+            elif max_samples is not None and k < max_samples:
+                # Expected file missing
+                print(f"  Warning: Expected sample {file_path} not found")
 
         if len(day_samples) > 0:
             synth_data.append(day_samples)
@@ -277,7 +287,12 @@ def main(args):
     # Load real and synth data
     print("\nLoading data...")
     real_data = load_real_data(config, day_ids)
-    synth_data = load_synth_data(synth_dir, day_ids)
+    # Load synth data (limit to K samples if specified)
+    # Use command-line arg if provided, otherwise use config K value
+    max_k = args.max_k if args.max_k is not None else config.get('sampling', {}).get('K', None)
+    if max_k is not None and max_k > 0:
+        print(f"Loading up to {max_k} samples per day")
+    synth_data = load_synth_data(synth_dir, day_ids, max_samples=max_k)
 
     # Aggregate statistics
     all_real_stats = []
@@ -431,6 +446,8 @@ if __name__ == "__main__":
                         help="Output directory for plots")
     parser.add_argument("--num_samples", type=int, default=20,
                         help="Number of samples to visualize (0 for all)")
+    parser.add_argument("--max_k", type=int, default=None,
+                        help="Max samples per day to load (None = use config K value, 0 = load all)")
 
     args = parser.parse_args()
     main(args)
