@@ -33,10 +33,13 @@ loss:
   # P90 = 11.7 mm/day, P95 = 20.1 mm/day, P99 = 43.6 mm/day
   scale: 11.7         # Based on P90 recommendation from analyze_parameters.py
   w_min: 0.1          # Min weight for light rain
-  w_max: 2.0          # Reduced from 3.0 to avoid over-emphasis on extremes
+  w_max: 10.0         # INCREASED from 2.0 - Force model to respect extremes >100mm
+                      # Cap now at 117mm (11.7 * 10) instead of 23mm
+                      # Empirical: w_max=2.0 caused severe underprediction in prior mode
 
   # Extra boost for extreme tail (P99+)
-  tail_boost: 1.5     # Moderate boost for P99+ pixels to improve extreme precipitation
+  tail_boost: 5.0     # INCREASED from 1.5 - Aggressive emphasis on P99+ pixels (>43.6mm)
+                      # P99+ events are rare (1% of data) and critical for SRDRN training
 
   # Mass conservation (optional, small weight)
   lambda_mass: 0.005  # Small weight for physical consistency
@@ -45,15 +48,17 @@ loss:
   lambda_gradient: 0.1  # Weight for gradient/edge preservation loss
 
   # KL divergence (required for VAE)
-  beta_kl: 0.05       # Increased from 0.03 to 0.05 - stronger prior matching
-                      # Target: KL < 128 (1.0 per dimension) for good prior-posterior alignment
-  warmup_epochs: 30   # Gradual warmup to avoid posterior collapse
+  beta_kl: 0.01       # DECREASED from 0.05 to 0.01 - Allow Z to encode intensity variations
+                      # Empirical evidence: beta=0.03 → Max=51mm, beta=0.05 → Max=12mm
+                      # Lower beta needed for extreme value modeling (not standard VAE!)
+                      # Trade-off: Higher capacity for extremes vs slightly larger prior-posterior gap
+  warmup_epochs: 50   # INCREASED from 30 - Longer warmup for stability with aggressive weights
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
 
 # Training configuration
 train:
-  epochs: 250           # Increased from 150 to allow more training time
+  epochs: 300           # INCREASED from 250 - More time for aggressive weights to converge
   batch_size: 64
   num_workers: 2
   lr: 0.0003            # Increased from 0.0001 for faster convergence
@@ -63,7 +68,7 @@ train:
   save_every: 10
 
   # Early stopping
-  early_stopping_patience: 60  # Increased from 40 to prevent premature stopping
+  early_stopping_patience: 80  # INCREASED from 60 - More patience for extreme value learning
   early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
   early_stopping_min_delta: 0.001    # Minimum improvement to count
 
@@ -77,7 +82,7 @@ train:
 # Learning rate scheduler
 scheduler:
   type: "cosine"
-  T_max: 250  # Updated to match new epoch count
+  T_max: 300  # Updated to match new epoch count
   eta_min: 0.000001
 
 # Validation
@@ -87,14 +92,13 @@ validation:
 
 # Sampling
 sampling:
-  mode: "prior"  # Use prior - with fixed KL divergence, prior sampling should work
+  mode: "prior"  # Use prior - lower beta_kl allows Z to carry intensity information
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 0.9  # CRITICAL FIX: Must match training posterior std (~1.1) for prior mode
-                    # With beta_kl=0.05, KL~18 means posterior std~1.1
-                    # Temperature=1.5 was too high, causing severe underprediction
-                    # Lower temperature (0.9-1.0) samples from trained latent space
+  temperature: 1.0  # Standard temperature for prior sampling
+                    # With beta_kl=0.01, posterior will be looser (σ~1.3-1.5)
+                    # Temperature=1.0 provides good balance of diversity and stability
   pixel_threshold: 0.1  # Physical detection limit for rain gauges (mm/day)
 
 # Device
