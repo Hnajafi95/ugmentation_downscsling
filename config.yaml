@@ -45,7 +45,7 @@ loss:
   lambda_gradient: 0.1  # Weight for gradient/edge preservation loss
 
   # KL divergence (required for VAE)
-  beta_kl: 0.01       # Reduced from 0.05 with spatial injection architecture (more freedom for diversity)
+  beta_kl: 0.03       # Increased from 0.01 - need stronger constraint for prior matching
   warmup_epochs: 30   # Gradual warmup to avoid posterior collapse
 
   p99_threshold: "from_thresholds_json"  # Will load P99=4.26
@@ -90,7 +90,7 @@ sampling:
   K: 5
   days: "heavy_only"
   min_threshold: 0.1
-  temperature: 0.7  # Reduced from 1.0 to better match learned posterior scale
+  temperature: 1.5  # Increased from 0.7 - sample from wider distribution to match posterior scale
   # pixel_threshold: 1.0  # REMOVED - ReLU fix allows model to naturally predict dry conditions
 
 # Device
