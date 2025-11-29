@@ -47,7 +47,7 @@ def load_model(checkpoint_path, config):
     return model
 
 
-def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=5):
+def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=None):
     """
     Load pre-generated samples from disk (created by sample_cvae.py).
 
@@ -55,7 +55,7 @@ def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=5):
         synth_dir: Path to directory containing saved samples
         dataset: CvaeDataset instance for loading real data
         num_days: Number of heavy days to load
-        samples_per_day: Number of samples per day (K)
+        samples_per_day: Number of samples per day (K). If None, auto-detect from first day.
 
     Returns:
         real_samples: (N, H, W) real heavy precipitation days
@@ -90,6 +90,23 @@ def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=5):
     # Limit to num_days
     valid_day_ids = valid_day_ids[:num_days]
 
+    # Auto-detect K if not provided
+    if samples_per_day is None:
+        # Check first day to determine K
+        first_day_id = valid_day_ids[0]
+        detected_k = 0
+        for k in range(20):  # Check up to 20 samples
+            synth_path = Path(synth_dir) / f"day_{first_day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
+            if synth_path.exists():
+                detected_k += 1
+            else:
+                break
+        samples_per_day = detected_k
+        print(f"Auto-detected K={samples_per_day} samples per day")
+
+    if samples_per_day == 0:
+        raise ValueError(f"No samples found in {synth_dir}. Run sample_cvae.py first.")
+
     real_samples = []
     generated_samples = []
     X_lr_samples = []
@@ -107,18 +124,20 @@ def load_saved_samples(synth_dir, dataset, num_days=50, samples_per_day=5):
         for k in range(samples_per_day):
             synth_path = Path(synth_dir) / f"day_{day_id:06d}_sample_{k:02d}.Y_hr_syn.npy"
 
-            if not synth_path.exists():
-                print(f"Warning: Missing sample {synth_path}")
-                continue
-
-            Y_syn = np.load(synth_path)  # (1, H, W)
-            day_generated.append(Y_syn[0])  # Take (H, W)
+            if synth_path.exists():
+                Y_syn = np.load(synth_path)  # (1, H, W)
+                day_generated.append(Y_syn[0])  # Take (H, W)
 
         if len(day_generated) == samples_per_day:
             generated_samples.append(np.stack(day_generated))
             loaded_count += 1
-        else:
-            print(f"Warning: Day {day_id} has incomplete samples ({len(day_generated)}/{samples_per_day})")
+        elif len(day_generated) > 0:
+            # Partial samples - pad with copies of last sample to maintain shape
+            print(f"Warning: Day {day_id} has {len(day_generated)}/{samples_per_day} samples, padding with last sample")
+            while len(day_generated) < samples_per_day:
+                day_generated.append(day_generated[-1].copy())
+            generated_samples.append(np.stack(day_generated))
+            loaded_count += 1
 
     if loaded_count == 0:
         raise ValueError(f"No saved samples found in {synth_dir}. "
@@ -533,8 +552,8 @@ if __name__ == "__main__":
                         help="Path to save evaluation metrics")
     parser.add_argument("--num_days", type=int, default=50,
                         help="Number of heavy days to evaluate")
-    parser.add_argument("--samples_per_day", type=int, default=5,
-                        help="Number of samples per day")
+    parser.add_argument("--samples_per_day", type=int, default=None,
+                        help="Number of samples per day (default: auto-detect from files)")
 
     args = parser.parse_args()
     main(args)
