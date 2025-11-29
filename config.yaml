@@ -68,7 +68,7 @@ train:
   save_every: 10
 
   # Early stopping
-  early_stopping_patience: 80  # INCREASED from 60 - More patience for extreme value learning
+  early_stopping_patience: 100  # INCREASED from 80 - Epoch 110 was better than epoch 38
   early_stopping_metric: "MAE_tail"  # Optimize directly for extremes!
   early_stopping_min_delta: 0.001    # Minimum improvement to count
 

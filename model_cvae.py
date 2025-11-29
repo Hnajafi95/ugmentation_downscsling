@@ -228,8 +228,13 @@ class Decoder(nn.Module):
     """
     Decoder that generates high-res precipitation conditioned on [z; h_X] AND spatial_X.
 
-    UPDATED: Injects spatial features from EncoderX at every layer via concatenation.
-    This forces the decoder to "see" the storm location throughout upsampling.
+    ARCHITECTURE V3: Injects spatial features ONLY at the first layer.
+    This forces deep layers to rely on Z for intensity/refinement information.
+
+    Rationale: When spatial features are injected at every layer, the decoder can
+    ignore Z and rely purely on X_lr features, causing prior mode to fail.
+    By injecting only once, the network must use Z to carry information through
+    the decoder layers, improving prior-mode extreme generation.
 
     Input: z (B, d_z), h_X (B, d_x), spatial_X (B, x_channels, 13, 11)
     Output: Y_hat (B, 1, H, W)
@@ -272,18 +277,17 @@ class Decoder(nn.Module):
         # Projection layer for spatial_X (normalize channel depth)
         self.x_proj = nn.Conv2d(x_channels, 32, kernel_size=1)
 
-        # Decoder blocks with SPATIAL INJECTION
-        # Input channels increased by 32 due to concatenation with spatial_X
-        # Block 1: (B, 512+32, ...) → (B, 256, ...)
+        # Decoder blocks - SPATIAL INJECTION ONLY AT FIRST LAYER
+        # Block 1: (B, 512+32, ...) → (B, 256, ...) - GETS spatial injection
         self.conv1 = nn.Conv2d(self.init_channels + 32, base_filters * 4, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(base_filters * 4)
 
-        # Block 2: (B, 256+32, ...) → (B, 128, ...)
-        self.conv2 = nn.Conv2d(base_filters * 4 + 32, base_filters * 2, kernel_size=3, padding=1)
+        # Block 2: (B, 256, ...) → (B, 128, ...) - NO spatial injection (removed +32)
+        self.conv2 = nn.Conv2d(base_filters * 4, base_filters * 2, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(base_filters * 2)
 
-        # Block 3: (B, 128+32, ...) → (B, 64, ...)
-        self.conv3 = nn.Conv2d(base_filters * 2 + 32, base_filters, kernel_size=3, padding=1)
+        # Block 3: (B, 128, ...) → (B, 64, ...) - NO spatial injection (removed +32)
+        self.conv3 = nn.Conv2d(base_filters * 2, base_filters, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(base_filters)
 
         # Final conv to output
@@ -326,18 +330,16 @@ class Decoder(nn.Module):
         # Project spatial features
         x_map = self.relu(self.x_proj(spatial_X))  # (B, 32, 13, 11)
 
-        # Block 1: Inject spatial, upsample, convolve
+        # Block 1: Inject spatial ONLY ONCE, upsample, convolve
         h = self.inject_spatial(h, x_map)  # (B, 512+32, 20, 17)
         h = F.interpolate(h, size=(self.H_step1, self.W_step1), mode='bilinear', align_corners=False)
         h = self.relu(self.bn1(self.conv1(h)))  # (B, 256, 39, 33)
 
-        # Block 2: Inject spatial, upsample, convolve
-        h = self.inject_spatial(h, x_map)  # (B, 256+32, 39, 33)
+        # Block 2: NO spatial injection - rely on Z and previous features
         h = F.interpolate(h, size=(self.H_step2, self.W_step2), mode='bilinear', align_corners=False)
         h = self.relu(self.bn2(self.conv2(h)))  # (B, 128, 78, 66)
 
-        # Block 3: Inject spatial, upsample, convolve
-        h = self.inject_spatial(h, x_map)  # (B, 128+32, 78, 66)
+        # Block 3: NO spatial injection - rely on Z and previous features
         h = F.interpolate(h, size=(self.H, self.W), mode='bilinear', align_corners=False)
         h = self.relu(self.bn3(self.conv3(h)))  # (B, 64, 156, 132)
 
